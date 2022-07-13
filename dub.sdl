@@ -1,0 +1,19 @@
+name "bindbc-geos"
+libs "geos_c"
+
+configuration "default" {
+    versions "GEOS_3_10"
+}
+
+configuration "betterC" {
+    buildOptions "betterC"
+    versions "GEOS_3_10"
+}
+
+configuration "unittest" {
+    versions "GEOS_3_10"
+}
+
+configuration "unittest38" {
+    versions "GEOS_3_8"
+}
