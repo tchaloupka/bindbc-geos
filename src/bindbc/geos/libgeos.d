@@ -7,14 +7,16 @@ module bindbc.geos.libgeos;
 enum GEOSSupport
 {
     geos_3_8, // lowest supported version
-    geos_3_10
+    geos_3_10,
+    geos_3_11,
+    geos_3_12
 }
 
 version (GEOS_3_8) enum geosSupport = GEOSSupport.geos_3_8;
 else version (GEOS_3_10) enum geosSupport = GEOSSupport.geos_3_10;
+else version (GEOS_3_11) enum geosSupport = GEOSSupport.geos_3_11;
+else version (GEOS_3_12) enum geosSupport = GEOSSupport.geos_3_12;
 else enum geosSupport = GEOSSupport.geos_3_8;
-
-nothrow @nogc:
 
 /************************************************************************
  *
@@ -290,6 +292,8 @@ alias GEOSDistanceCallback = int function (
 * \see GEOS_interruptCancel
 */
 alias GEOSInterruptCallback = void function ();
+
+nothrow @nogc:
 
 /**
 * Register a function to be called when processing is interrupted.
@@ -1489,6 +1493,33 @@ int GEOSGeom_getYMax_r (
     GEOSContextHandle_t handle,
     const(GEOSGeometry)* g,
     double* value);
+
+/** \see GEOSGeom_getExtent */
+int GEOSGeom_getExtent_r(
+    GEOSContextHandle_t handle,
+    const GEOSGeometry* g,
+    double* xmin,
+    double* ymin,
+    double* xmax,
+    double* ymax);
+
+/**
+* Finds the extent (minimum and maximum X and Y value) of the geometry.
+* Raises an exception for empty geometry input.
+*
+* \param[in] g Input geometry
+* \param[out] xmin Pointer to place result for minimum X value
+* \param[out] ymin Pointer to place result for minimum Y value
+* \param[out] xmax Pointer to place result for maximum X value
+* \param[out] ymax Pointer to place result for maximum Y value
+* \return 1 on success, 0 on exception
+*/
+int GEOSGeom_getExtent(
+    const GEOSGeometry* g,
+    double* xmin,
+    double* ymin,
+    double* xmax,
+    double* ymax);
 
 /** \see GEOSGeomGetPointN */
 GEOSGeometry* GEOSGeomGetPointN_r (

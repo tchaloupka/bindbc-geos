@@ -2,18 +2,18 @@ name "bindbc-geos"
 libs "geos_c"
 
 configuration "default" {
-    versions "GEOS_3_10"
+    versions "GEOS_3_8" // in Ubuntu 20.04LTS
 }
 
 configuration "betterC" {
     buildOptions "betterC"
-    versions "GEOS_3_10"
+    versions "GEOS_3_8" // in Ubuntu 20.04LTS
 }
 
 configuration "unittest" {
-    versions "GEOS_3_10"
+    versions "GEOS_3_8"
 }
 
-configuration "unittest38" {
-    versions "GEOS_3_8"
+configuration "unittest310" {
+    versions "GEOS_3_10"
 }
