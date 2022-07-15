@@ -26,8 +26,8 @@ void initGEOS(MessageHandler handler = null) @trusted nothrow @nogc
     ctx = GEOS_init_r();
     if (ctx is null) assert(0, "Failed to initialize GEOS");
     if (handler !is null) msgHandler = handler;
-    GEOSContext_setNoticeHandler_r(ctx, &msgHandlerNotice);
-    GEOSContext_setErrorHandler_r(ctx, &msgHandlerError);
+    GEOSContext_setNoticeHandler_r(ctx, &msgHandlerImpl!(MessageLevel.notice));
+    GEOSContext_setErrorHandler_r(ctx, &msgHandlerImpl!(MessageLevel.error));
     wktWriter = GEOSWKTWriter_create_r(ctx);
     if (wktWriter is null) assert(0, "Failed to create WKT writer");
     GEOSWKTWriter_setTrim_r(ctx, wktWriter, 1); // enable trailing 0 trimming
@@ -95,8 +95,6 @@ union PointXYZ(int dims) if (dims.among(2, 3))
         double x, y;
         static if (dims == 3) double z;
     }
-
-    alias coords this;
 }
 
 alias PointZ = PointXYZ!3;
@@ -183,11 +181,19 @@ struct CoordSequence
         }
     }
 
+    /// ditto - just variadic variant for coordinate structs as a source
+    this(P)(const(P)[] points...) @trusted nothrow @nogc
+        if (isPointStruct!P)
+    {
+        this(points);
+    }
+
     @disable this(this); /// Copy is not allowed - use move() or clone()
 
     ~this() @trusted nothrow @nogc
     {
-        if (seq !is null) GEOSCoordSeq_destroy_r(ctx, seq);
+        if (seq !is null && own)
+            GEOSCoordSeq_destroy_r(ctx, seq);
     }
 
     /// Create a new copy of the geometry.
@@ -287,10 +293,10 @@ struct CoordSequence
         PointZ p = void;
         int r;
         if (dimensions == 2) {
-            r = GEOSCoordSeq_getXY_r(ctx, seq, cast(uint)idx, &p[0], &p[1]);
+            r = GEOSCoordSeq_getXY_r(ctx, seq, cast(uint)idx, &p.x, &p.y);
             p.z = double.init;
         }
-        else r = GEOSCoordSeq_getXYZ_r(ctx, seq, cast(uint)idx, &p[0], &p[1], &p[2]);
+        else r = GEOSCoordSeq_getXYZ_r(ctx, seq, cast(uint)idx, &p.x, &p.y, &p.z);
         assert (r == 1, "Failed to get point coordinates");
         return p;
     }
@@ -354,9 +360,11 @@ struct CoordSequence
 
     private:
     GEOSCoordSequence* seq;
+    bool own = true;
 }
 
 ///
+@("CoordSequence")
 @safe unittest
 {
     import std.math : isNaN;
@@ -371,7 +379,7 @@ struct CoordSequence
     assert(coords[0, 1] == -2);
     assert(coords[$-1, 0] == -1);
     assert(coords[$-1, $-1] == -2);
-    assert(coords[1][0] == 1);
+    assert(coords[1].x == 1);
     assert(coords[1].z.isNaN);
     coords[0, 0] = 42;
     assert(coords[0, 0] == 42);
@@ -500,28 +508,136 @@ struct Geometry
         if (g) GEOSGeom_destroy_r(ctx, g);
     }
 
-    /// Creates an empty point.
-    static Geometry emptyPoint() @trusted nothrow @nogc
+    /// Creates an empty Point geometry.
+    static Geometry createEmptyPoint() @trusted nothrow @nogc
     in (ctx !is null, "GEOS thread context not initialized")
     {
-        Geometry p;
-        p.g = GEOSGeom_createEmptyPoint_r(ctx);
-        if (p.g is null) assert(0, "Failed to create emptyPoint");
-        return p;
+        Geometry res;
+        res.g = GEOSGeom_createEmptyPoint_r(ctx);
+        if (res.g is null) assert(0, "Failed to create empty Point");
+        return res;
     }
 
-    /// Creates a point geometry from a pair of coordinates.
+    /// Creates a Point geometry from a pair of coordinates.
     static Geometry createPoint(double x, double y) @trusted nothrow @nogc
     in (ctx !is null, "GEOS thread context not initialized")
     {
-        Geometry p;
-        p.g = GEOSGeom_createPointFromXY_r(ctx, x, y);
-        if (p.g is null) assert(0, "Failed to create point");
-        return p;
+        Geometry res;
+        res.g = GEOSGeom_createPointFromXY_r(ctx, x, y);
+        if (res.g is null) assert(0, "Failed to create Point");
+        return res;
+    }
+
+    /// Creates a Point geometry from `CoordSequence`
+    static Geometry createPoint(CoordSequence coord) @trusted nothrow @nogc
+    in (ctx !is null, "GEOS thread context not initialized")
+    in (coord.seq, "Uninitialized coord sequence")
+    {
+        Geometry res;
+        res.g = GEOSGeom_createPoint_r(ctx, coord.seq);
+        if (res.g is null) assert(0, "Failed to create Point");
+        coord.seq = null; // geometry takes ownership of coord sequence
+        return res;
+    }
+
+    /// Creates LinearRing geometry from `CoordSequence`
+    static Geometry createLinearRing(CoordSequence coords) @trusted nothrow @nogc
+    in (ctx !is null, "GEOS thread context not initialized")
+    in (coords.seq, "Uninitialized coord sequence")
+    {
+        Geometry res;
+        res.g = GEOSGeom_createLinearRing_r(ctx, coords.seq);
+        if (res.g is null) assert(0, "Failed to create LinearRing");
+        coords.seq = null; // geometry takes ownership of coords sequence
+        return res;
+    }
+
+    /// Creates LineString geometry from `CoordSequence`
+    static Geometry createLineString(CoordSequence coords) @trusted nothrow @nogc
+    in (ctx !is null, "GEOS thread context not initialized")
+    in (coords.seq, "Uninitialized coord sequence")
+    {
+        Geometry res;
+        res.g = GEOSGeom_createLineString_r(ctx, coords.seq);
+        if (res.g is null) assert(0, "Failed to create LineString");
+        coords.seq = null; // geometry takes ownership of coords sequence
+        return res;
+    }
+
+    /// Creates an empty LineString.
+    static Geometry createEmptyLineString() @trusted nothrow @nogc
+    in (ctx !is null, "GEOS thread context not initialized")
+    {
+        Geometry res;
+        res.g = GEOSGeom_createEmptyLineString_r(ctx);
+        if (res.g is null) assert(0, "Failed to create empty LineString");
+        return res;
+    }
+
+    /// Creates an empty Polygon.
+    static Geometry createEmptyPolygon() @trusted nothrow @nogc
+    in (ctx !is null, "GEOS thread context not initialized")
+    {
+        Geometry res;
+        res.g = GEOSGeom_createEmptyPolygon_r(ctx);
+        if (res.g is null) assert(0, "Failed to create empty Polygon");
+        return res;
+    }
+
+    /// Creates a Polygon geometry from line ring geometries.
+    /// Created Geometry takes ownership of the supplied ones.
+    static Geometry createPolygon(Geometry shell, Geometry[] holes...) @trusted nothrow @nogc
+    in (ctx !is null, "GEOS thread context not initialized")
+    in (shell.g, "Uninitialized shell geometry")
+    {
+        import core.exception : onOutOfMemoryError;
+        Geometry res;
+        if (holes.length)
+        {
+            // we need to make an array of Geometry pointers first
+            if (holes.length >= 64)
+            {
+                GEOSGeometry*[64] buf;
+                foreach (i, ref h; holes) {
+                    assert(h.g, "Uninitialized hole geometry");
+                    buf[i] = h.g;
+                }
+                res.g = GEOSGeom_createPolygon_r(ctx, shell.g, buf.ptr, cast(uint)holes.length);
+            }
+            else
+            {
+                auto pholes = cast(GEOSGeometry**)malloc((GEOSGeometry*).sizeof * holes.length);
+                if (!pholes) onOutOfMemoryError();
+                foreach (i, ref h; holes) {
+                    assert(h.g, "Uninitialized hole geometry");
+                    pholes[i] = h.g;
+                }
+                res.g = GEOSGeom_createPolygon_r(ctx, shell.g, pholes, cast(uint)holes.length);
+            }
+        }
+        else res.g = GEOSGeom_createPolygon_r(ctx, shell.g, null, 0);
+        if (res.g is null) assert(0, "Failed to create LineString");
+        shell.g = null; // geometry takes ownership
+        foreach (ref h; holes) h.g = null; // for holes too
+        return res;
+    }
+
+// TODO:
+// GEOSGeometry* GEOSGeom_createCollection (int type, GEOSGeometry **geoms, unsigned int ngeoms)
+// GEOSGeometry* GEOSGeom_createEmptyCollection (int type)
+// GEOSGeometry* GEOSGeom_createRectangle (double xmin, double ymin, double xmax, double ymax)
+
+    /// Tests whether the input geometry is empty. If the geometry or any component is non-empty,
+    /// the geometry is non-empty. An empty geometry has no boundary or interior.
+    bool isEmpty() const @trusted nothrow @nogc
+    in (g !is null, "unitialized geometry")
+    {
+        return GEOSisEmpty_r(ctx, g) == 1;
     }
 
     /// Generates geometry as [WKT](https://libgeos.org/specifications/wkt/) string
     void toString(S)(auto ref S sink) const @trusted
+    in (g !is null, "unitialized geometry")
     {
         import core.stdc.string : strlen;
         char* s = GEOSWKTWriter_write_r(ctx, wktWriter, g);
@@ -532,6 +648,7 @@ struct Geometry
 
     /// ditto
     string toString() const @trusted
+    in (g !is null, "unitialized geometry")
     {
         import core.stdc.string : strlen;
         char* s = GEOSWKTWriter_write_r(ctx, wktWriter, g);
@@ -556,12 +673,15 @@ struct Geometry
 }
 
 ///
+@("Point geometry")
 @safe
 unittest
 {
+    import core.lifetime : move;
     import std.array : Appender;
     import std.math : isNaN;
 
+    // Point from x, y
     auto point = Geometry.createPoint(1, 2);
     assert(point.g !is null);
     assert(point.typeId == GEOSGeomTypes.GEOS_POINT);
@@ -584,9 +704,30 @@ unittest
     assert(ext.ymin == 2);
     assert(ext.ymax == 2);
 
+    // WKT string generation
     Appender!string buf;
     point.clone().toString((const(char)[] s) {buf ~= s; });
     assert(buf.data == "POINT (1 2)", buf.data);
+
+    // Point from coord sequence
+    auto cseq = CoordSequence(Point(1,2));
+    point = Geometry.createPoint(cseq.move); // move is needed as CoordSequence is not copyable and Geometry takes ownership of the sequence
+    assert(cseq.seq is null);
+    assert(point.x == 1);
+    assert(point.y == 2);
+    assert(!point.isEmpty);
+
+    // Empty point
+    point = Geometry.createEmptyPoint();
+    assert(point.isEmpty);
+}
+
+///
+@("Linestring geometry")
+@safe
+unittest
+{
+
 }
 
 private:
@@ -608,50 +749,38 @@ void defaultMessageHandler(MessageLevel lvl, const(char)[] msg) @trusted nothrow
 }
 
 extern (C) nothrow @trusted
-void msgHandlerNotice(const(char)* fmt, ...)
+void msgHandlerImpl(MessageLevel lvl)(const(char)* fmt, ...)
 {
-
     va_list ap;
+
+    // /* Determine required size. */
+    // va_start(ap, fmt);
+    // auto n = vsnprintf(null, 0, fmt, ap);
+    // va_end(ap);
+
+    // if (n < 0) return;
+
+    // size_t size = n + 1;      /* One extra byte for '\0' */
+    // auto p = cast(char*)malloc(size);
+    // if (p is null) return;
+
+    // va_start(ap, fmt);
+    // n = vsnprintf(p, size, fmt, ap);
+    // va_end(ap);
+
+    // if (n < 0) {
+    //     free(p);
+    //     return;
+    // }
+
+    // Workaround: abowe doesn't work due to the https://issues.dlang.org/show_bug.cgi?id=21425
+    char[512] buf;
     va_start(ap, fmt);
-    auto msg = makeMessage(fmt, ap);
-    msgHandler(MessageLevel.notice, msg);
-    free(msg.ptr);
+    auto n = vsnprintf(buf.ptr, buf.length, fmt, ap);
     va_end(ap);
-}
 
-extern (C) nothrow @trusted
-void msgHandlerError(const(char)* fmt, ...)
-{
-
-    va_list ap;
-    va_start(ap, fmt);
-    auto msg = makeMessage(fmt, ap);
-    msgHandler(MessageLevel.error, msg);
-    free(msg.ptr);
-    va_end(ap);
-}
-
-// assembles the formatted message (needs to be freed afterwards)
-char[] makeMessage(const char *fmt, va_list ap) @trusted nothrow @nogc
-{
-    /* Determine required size. */
-    auto n = vsnprintf(null, 0, fmt, ap);
-
-    if (n < 0)
-        return null;
-
-    size_t size = n + 1;      /* One extra byte for '\0' */
-    auto p = cast(char*)malloc(size);
-    if (p is null) return null;
-
-    n = vsnprintf(p, size, fmt, ap);
-
-    if (n < 0) {
-        free(p);
-        return null;
-    }
-
-    return p[0..n];
+    msgHandler(lvl, buf[0..n]);
+    // free(p);
 }
 
 template isStaticArrayPoint(P)
