@@ -7,6 +7,7 @@ import core.stdc.stdarg;
 import core.stdc.stdio;
 import core.stdc.stdlib;
 import bindbc.geos.libgeos;
+import std.algorithm : among;
 
 enum MessageLevel { notice, error }
 
@@ -41,9 +42,376 @@ void finishGEOS() @trusted nothrow @nogc
     GEOS_finish_r(ctx);
 }
 
+/// Returns the current GEOS version string. eg: "3.10.0"
+string geosVersion() @trusted nothrow @nogc
+{
+    import core.stdc.string : strlen;
+    import std.exception : assumeUnique;
+    auto pc = GEOSversion();
+    return pc[0..strlen(pc)].assumeUnique;
+}
+
+version (unittest)
+{
+    static this() @trusted nothrow @nogc
+    {
+        initGEOS();
+        printf("Initialized GEOS Version: %s\n", geosVersion().ptr); // points to a zero terminated string literal
+    }
+    static ~this() @safe nothrow @nogc { finishGEOS(); }
+}
+
+/// Simple type used to work with point coordinates
+union PointXYZ(int dims) if (dims.among(2, 3))
+{
+    /// Point constructor
+    this(double[dims] coords)
+    {
+        this.coords = coords;
+    }
+
+    static if (dims == 3)
+    {
+        /// Ditto
+        this(double x, double y, double z = double.init)
+        {
+            this.x = x;
+            this.y = y;
+            this.z = z;
+        }
+    }
+    else
+    {
+        /// Ditto
+        this(double x, double y)
+        {
+            this.x = x;
+            this.y = y;
+        }
+    }
+
+    double[dims] coords;
+    struct {
+        double x, y;
+        static if (dims == 3) double z;
+    }
+
+    alias coords this;
+}
+
+alias PointZ = PointXYZ!3;
+alias Point = PointXYZ!2;
+
+/// Geometry extent coordinates (rectangle)
+struct Extent
+{
+    double xmin;
+    double ymin;
+    double xmax;
+    double ymax;
+}
+
+/**
+ * Wrapper around GEOS library `GEOSCoordSequence` type.
+ * Underlying instance is automatically freed using RAII.
+ */
+struct CoordSequence
+{
+// int 	GEOSCoordSeq_copyToBuffer (const GEOSCoordSequence *s, double *buf, int hasZ, int hasM)
+// int 	GEOSCoordSeq_copyToArrays (const GEOSCoordSequence *s, double *x, double *y, double *z, double *m)
+
+    /**
+     * Constructs `CoordSequence` with known size but with uninitialized coordinates.
+     *
+     * Note: Coordinate values of this sequence'll be left undefined and must be set separately.
+     * It'll contain random garbage values otherwise. Thats why it's marked as `@system`.
+     */
+    this(uint size, uint dims) @system nothrow @nogc
+    in (ctx !is null, "GEOS thread context not initialized")
+    in (size > 0, "Can't create empty sequence")
+    in (dims == 2 || dims == 3, "Dimensionality of the coordinates must be in 2 or 3")
+    {
+        seq = GEOSCoordSeq_create_r(ctx, size, dims);
+        if (seq is null) assert(0, "Failed to initialize CoordSequence");
+    }
+
+    /// Constructs `CoordSequence` from individual array for each dimension.
+    this(const(double)[] x, const(double)[] y, const(double)[] z = null) @trusted nothrow @nogc
+    in (ctx !is null, "GEOS thread context not initialized")
+    in (x.length && y.length, "x and y arrays must have elements")
+    in (x.length == y.length && (!z.length || x.length == z.length), "Coordinate arrays must be of equal length")
+    in (x.length <= uint.max, "Sequence too large")
+    {
+        seq = GEOSCoordSeq_copyFromArrays_r(ctx, x.ptr, y.ptr, z.ptr, null, cast(uint)x.length);
+        if (seq is null) assert(0, "Failed to initialize CoordSequence");
+    }
+
+    /// Constructs `CoordSequence` from array of supported point types
+    this(P)(const(P)[] points) @trusted nothrow @nogc
+        if (isPoint!P)
+    in (ctx !is null, "GEOS thread context not initialized")
+    in (points.length <= uint.max, "Too many points")
+    in (points.length > 0, "Can't create empty sequence")
+    {
+        static if (isStaticArrayPoint!P) {
+            seq = GEOSCoordSeq_copyFromBuffer_r(ctx, points.ptr, points.length, points[0].length-2, 0);
+            if (seq is null) assert(0, "Failed to initialize CoordSequence");
+        }
+        else static if (isDynamicArrayPoint!P)
+        {
+            // get required dimensions
+            auto dims = points[0].length;
+            assert(dims.among(2, 3), "Invalid coordinate dimensions");
+
+            // prepare space for coordinates
+            seq = GEOSCoordSeq_create_r(ctx, cast(uint)points.length, cast(uint)dims);
+            if (seq is null) assert(0, "Failed to initialize CoordSequence");
+
+            // assign individual points
+            foreach (i, ref p; points) this[i] = p;
+        }
+        else
+        {
+            // prepare space for coordinates
+            static if (is(typeof(points[0].z) : double)) enum dims = 3;
+            else enum dims = 2;
+            seq = GEOSCoordSeq_create_r(ctx, cast(uint)points.length, dims);
+            if (seq is null) assert(0, "Failed to initialize CoordSequence");
+
+            // assign individual points
+            foreach (i, ref p; points) this[i] = p;
+        }
+    }
+
+    @disable this(this); /// Copy is not allowed - use move() or clone()
+
+    ~this() @trusted nothrow @nogc
+    {
+        if (seq !is null) GEOSCoordSeq_destroy_r(ctx, seq);
+    }
+
+    /// Create a new copy of the geometry.
+    CoordSequence clone() const @trusted nothrow @nogc
+    {
+        CoordSequence cseq;
+        if (this.seq) {
+            cseq.seq = GEOSCoordSeq_clone_r(ctx, this.seq);
+            if (cseq.seq is null) assert(0, "Failed to clone sequence");
+        }
+        return cseq;
+    }
+
+    /// Copy the contents of a coordinate sequence to individual dimension buffers
+    void toArrays(double[] x, double[] y, double[] z = null) const @trusted nothrow @nogc
+    in (seq !is null, "unitialized sequence")
+    in (x.length == y.length && (z.length == 0 || z.length == x.length) && x.length == length(), "Lengths don't match")
+    {
+        int res;
+        if (z.length)
+        {
+            assert(dimensions() == 3, "Incompatible dimensions");
+            res = GEOSCoordSeq_copyToArrays_r(ctx, seq, x.ptr, y.ptr, z.ptr, null);
+        }
+        else
+            res = GEOSCoordSeq_copyToArrays_r(ctx, seq, x.ptr, y.ptr, null, null);
+        assert(res == 1, "Failed to copy coordinates");
+    }
+
+    /// Copy the contents of a coordinate sequence to a buffer of doubles (XYXY or XYZXYZ)
+    void toBuffer(int N)(double[N][] buf) const @trusted nothrow @nogc
+    in (seq !is null, "unitialized sequence")
+    in (buf.length == length(), "Lengths don't match")
+    {
+        int res;
+        static if (N == 2)
+            res = GEOSCoordSeq_copyToBuffer_r(ctx, seq, cast(double*)buf.ptr, 0, 0);
+        else
+        {
+            assert(dimensions() == 3, "Incompatible dimensions");
+            res = GEOSCoordSeq_copyToBuffer_r(ctx, seq, cast(double*)buf.ptr, 1, 0);
+        }
+        assert(res == 1, "Failed to copy coordinates");
+    }
+
+    /// Get size info from a coordinate sequence.
+    uint length() const @trusted nothrow @nogc
+    in (seq !is null, "unitialized sequence")
+    {
+        uint sz = void;
+        auto r = GEOSCoordSeq_getSize_r(ctx, seq, &sz);
+        assert(r == 1, "Failed to get sequence size");
+        return sz;
+    }
+
+    /// Get dimension info from a coordinate sequence.
+    uint dimensions() const @trusted nothrow @nogc
+    in (seq !is null, "unitialized sequence")
+    {
+        uint dims = void;
+        auto r = GEOSCoordSeq_getDimensions_r(ctx, seq, &dims);
+        assert(r == 1, "Failed to get sequence dimensions");
+        return dims;
+    }
+
+    /**
+     * Check orientation of a coordinate sequence. Closure of the sequence is assumed. Invalid (collapsed) sequences will return false.
+     * Sequence must have at least 4 points.
+     */
+    bool isCCW() const @trusted nothrow @nogc
+    in (seq !is null, "unitialized sequence")
+    in (length >= 4, "not enough points to check CCW")
+    {
+        char isccw = void;
+        auto r = GEOSCoordSeq_isCCW_r(ctx, seq, &isccw);
+        assert(r == 1, "Failed to check if sequence is counter clockwise");
+        return isccw == 1;
+    }
+
+    /// Gets value of requested coordinate in sequence
+    double opIndex(size_t idx, size_t dim) const @trusted nothrow @nogc
+    in (seq !is null, "unitialized sequence")
+    in (idx < length, "invalid index")
+    in (dim < dimensions, "invalid dimension")
+    {
+        double v = void;
+        auto r = GEOSCoordSeq_getOrdinate_r(ctx, seq, cast(uint)idx, cast(uint)dim, &v);
+        assert (r == 1, "Failed to get coordinate value");
+        return v;
+    }
+
+    /// ditto
+    const(PointZ) opIndex(size_t idx) const @trusted nothrow @nogc
+    in (seq !is null, "unitialized sequence")
+    in (idx < length, "invalid index")
+    {
+        PointZ p = void;
+        int r;
+        if (dimensions == 2) {
+            r = GEOSCoordSeq_getXY_r(ctx, seq, cast(uint)idx, &p[0], &p[1]);
+            p.z = double.init;
+        }
+        else r = GEOSCoordSeq_getXYZ_r(ctx, seq, cast(uint)idx, &p[0], &p[1], &p[2]);
+        assert (r == 1, "Failed to get point coordinates");
+        return p;
+    }
+
+    /// Support for dollar indexing
+    int opDollar(size_t pos)() const @trusted nothrow @nogc
+    {
+        static if (pos == 0) return length();
+        else static if (pos == 1) return dimensions();
+        else static assert(0, "Invalid index dimension");
+    }
+
+    /// Set Nth ordinate value in a coordinate sequence.
+    double opIndexAssign(double value, size_t idx, size_t dim) @trusted nothrow @nogc
+    in (seq !is null, "unitialized sequence")
+    in (idx < length, "invalid index")
+    in (dim < dimensions, "invalid dimension")
+    {
+        auto r = GEOSCoordSeq_setOrdinate_r(ctx, seq, cast(uint)idx, cast(uint)dim, value);
+        assert (r == 1, "Failed to set coordinate value");
+        return value;
+    }
+
+    /// ditto for generic acceptable point types
+    auto opIndexAssign(P)(auto ref P point, size_t idx) @trusted nothrow @nogc
+        if (isPoint!P)
+    in (seq !is null, "unitialized sequence")
+    in (idx < length, "invalid index")
+    {
+        int res;
+        static if (isStaticArrayPoint!P)
+        {
+            assert(dimensions() == point.length, "Incompatible dimensions");
+            static if (N == 2)
+                res = GEOSCoordSeq_setXY_r(ctx, seq, cast(uint)idx, cast(double)point[0], cast(double)point[1]);
+            else
+                res = GEOSCoordSeq_setXYZ_r(ctx, seq, cast(uint)idx, cast(double)point[0], cast(double)point[1], cast(double)point[2]);
+        }
+        else static if (isDynamicArrayPoint!P)
+        {
+            assert(point.length.among(2, 3), "Invalid coordinate length");
+            assert(dimensions() == point.length, "Invalid coordinate length");
+            if (dimensions() == 2)
+                res = GEOSCoordSeq_setXY_r(ctx, seq, cast(uint)idx, cast(double)point[0], cast(double)point[1]);
+            else
+                res = GEOSCoordSeq_setXYZ_r(ctx, seq, cast(uint)idx, cast(double)point[0], cast(double)point[1], cast(double)point[2]);
+        }
+        else
+        {
+            static if (is(typeof(point.z) : double)) {
+                assert(dimensions() == 3, "Incompatible dimensions");
+                res = GEOSCoordSeq_setXYZ_r(ctx, seq, cast(uint)idx, cast(double)point.x, cast(double)point.y, cast(double)point.z);
+            } else {
+                assert(dimensions() == 2, "Incompatible dimensions");
+                res = GEOSCoordSeq_setXY_r(ctx, seq, cast(uint)idx, cast(double)point.x, cast(double)point.y);
+            }
+        }
+        assert (res == 1, "Failed to set coordinate value");
+        return point;
+    }
+
+    private:
+    GEOSCoordSequence* seq;
+}
+
+///
+@safe unittest
+{
+    import std.math : isNaN;
+
+    // construct with separate dimension arrays
+    auto coords = CoordSequence([-1, 1, 1, -1, -1], [-2, -2, 2, 2, -2]);
+    assert(coords.dimensions == 2);
+    assert(coords.length == 5);
+    assert(coords.clone().length == 5);
+    assert(coords.isCCW);
+    assert(coords[0, 0] == -1);
+    assert(coords[0, 1] == -2);
+    assert(coords[$-1, 0] == -1);
+    assert(coords[$-1, $-1] == -2);
+    assert(coords[1][0] == 1);
+    assert(coords[1].z.isNaN);
+    coords[0, 0] = 42;
+    assert(coords[0, 0] == 42);
+
+    // construct with uninitialized coordinates
+    () @trusted
+    {
+        coords = CoordSequence(1, 2);
+        coords[0] = [42, 666];
+        assert(coords[0].x == 42);
+        assert(coords[0].y == 666);
+    }();
+
+    // construct with point array
+    coords = CoordSequence([[1,2], [3,4]]);
+    assert(coords[0].x == 1);
+    assert(coords[0].y == 2);
+    assert(coords[1].x == 3);
+    assert(coords[1].y == 4);
+
+    coords = CoordSequence([Point(1,2), Point(3,4)]);
+    assert(coords[0].x == 1);
+    assert(coords[0].y == 2);
+    assert(coords[1].x == 3);
+    assert(coords[1].y == 4);
+
+    // copy to buffers
+    double[] x = new double[2];
+    double[] y = new double[2];
+    double[2][] p = new double[2][2];
+    coords.toArrays(x, y);
+    assert(x == [1, 3]);
+    assert(y == [2, 4]);
+    coords.toBuffer(p);
+    assert(p == [[1, 2], [3, 4]]);
+}
+
 /**
  * Wrapper around GEOS library `GEOSGeometry*` type.
- * Geometry instance from GEOS is automatically freed using RAII.
+ * Underlying instance is automatically freed using RAII.
  */
 struct Geometry
 {
@@ -180,27 +548,14 @@ struct Geometry
     in (g !is null, "unitialized geometry")
     in (typeId() == GEOSGeomTypes.GEOS_POINT, "Operation is valid only on Point geometry")
     {
-        double coord;
+        double coord = void;
         auto r = fn(ctx, g, &coord);
         assert(r == 1, "Error getting coordinate");
         return coord;
     }
 }
 
-struct Extent
-{
-    double xmin;
-    double ymin;
-    double xmax;
-    double ymax;
-}
-
-version (unittest)
-{
-    static this() @safe nothrow @nogc { initGEOS(); }
-    static ~this() @safe nothrow @nogc { finishGEOS(); }
-}
-
+///
 @safe
 unittest
 {
@@ -298,3 +653,27 @@ char[] makeMessage(const char *fmt, va_list ap) @trusted nothrow @nogc
 
     return p[0..n];
 }
+
+template isStaticArrayPoint(P)
+{
+    enum isStaticArrayPoint = is(P : C[N],C,N) && is(C : double) (N == 2 || N == 3);
+}
+
+template isDynamicArrayPoint(P)
+{
+    enum isDynamicArrayPoint = !isPointStruct!P && is(P : C[], C) && is(C : double);
+}
+
+template isPointStruct(P)
+{
+    enum isPointStruct = is(typeof(P.x) : double) && is(typeof(P.y) : double);
+}
+
+template isPoint(P)
+{
+    enum isPoint = isStaticArrayPoint!P || isDynamicArrayPoint!P || isPointStruct!P;
+}
+
+static assert(isPoint!Point);
+static assert(!isStaticArrayPoint!Point);
+static assert(!isDynamicArrayPoint!Point);
