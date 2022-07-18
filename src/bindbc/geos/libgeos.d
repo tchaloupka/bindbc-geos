@@ -733,6 +733,12 @@ GEOSGeometry* GEOSGeom_createEmptyCollection_r (
     GEOSContextHandle_t handle,
     int type);
 
+/** \see GEOSGeom_createRectangle */
+GEOSGeometry* GEOSGeom_createRectangle_r(
+    GEOSContextHandle_t handle,
+    double xmin, double ymin,
+    double xmax, double ymax);
+
 /** \see GEOSGeom_clone */
 GEOSGeometry* GEOSGeom_clone_r (
     GEOSContextHandle_t handle,
@@ -2405,6 +2411,18 @@ GEOSGeometry* GEOSGeom_createCollection (
 * Caller is responsible for freeing with GEOSGeom_destroy().
 */
 GEOSGeometry* GEOSGeom_createEmptyCollection (int type);
+
+/**
+* Create a rectangular polygon from bounding coordinates.
+* Will return a point geometry if width and height are 0.
+* \param xmin Left bound of envelope
+* \param ymin Lower bound of envelope
+* \param xmax Right bound of envelope
+* \param ymax Upper bound of envelope
+*/
+GEOSGeometry* GEOSGeom_createRectangle(
+    double xmin, double ymin,
+    double xmax, double ymax);
 
 /**
 * Create a new copy of the input geometry.

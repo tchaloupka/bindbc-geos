@@ -6,8 +6,10 @@ module bindbc.geos.wrapper;
 import core.stdc.stdarg;
 import core.stdc.stdio;
 import core.stdc.stdlib;
+import core.stdc.string : strlen;
 import bindbc.geos.libgeos;
 import std.algorithm : among;
+import std.math : isNaN;
 
 enum MessageLevel { notice, error }
 
@@ -45,7 +47,6 @@ void finishGEOS() @trusted nothrow @nogc
 /// Returns the current GEOS version string. eg: "3.10.0"
 string geosVersion() @trusted nothrow @nogc
 {
-    import core.stdc.string : strlen;
     import std.exception : assumeUnique;
     auto pc = GEOSversion();
     return pc[0..strlen(pc)].assumeUnique;
@@ -109,6 +110,35 @@ struct Extent
     double ymax;
 }
 
+/// Simple wrapper for GEOS allocated strings.
+struct GeosString
+{
+    @disable this(this); /// disable copying
+
+    ~this() nothrow @nogc @trusted
+    {
+        if (str) GEOSFree_r(ctx, c);
+    }
+
+    const(char)[] str() const nothrow @nogc @trusted
+    {
+        if (c is null) return null;
+        return c[0..len];
+    }
+
+    private:
+    char* c;
+    size_t len;
+
+    this(char* str) @trusted nothrow @nogc
+    in (ctx !is null, "GEOS thread context not initialized")
+    in (str !is null, "Null pointer provided")
+    {
+        this.c = str;
+        this.len = strlen(str);
+    }
+}
+
 /**
  * Wrapper around GEOS library `GEOSCoordSequence` type.
  * Underlying instance is automatically freed using RAII.
@@ -140,8 +170,29 @@ struct CoordSequence
     in (x.length == y.length && (!z.length || x.length == z.length), "Coordinate arrays must be of equal length")
     in (x.length <= uint.max, "Sequence too large")
     {
-        seq = GEOSCoordSeq_copyFromArrays_r(ctx, x.ptr, y.ptr, z.ptr, null, cast(uint)x.length);
-        if (seq is null) assert(0, "Failed to initialize CoordSequence");
+        static if (geosSupport >= GEOSSupport.geos_3_10)
+        {
+            seq = GEOSCoordSeq_copyFromArrays_r(ctx, x.ptr, y.ptr, z.ptr, null, cast(uint)x.length);
+            if (seq is null) assert(0, "Failed to initialize CoordSequence");
+        }
+        else
+        {
+            if (!z.length)
+            {
+                this(cast(uint)x.length, 2);
+                for (uint i=0; i<x.length; ++i) {
+                    this[i, 0] = x[i];
+                    this[i, 1] = y[i];
+                }
+            } else  {
+                this(cast(uint)x.length, 3);
+                for (uint i=0; i<x.length; ++i) {
+                    this[i, 0] = x[i];
+                    this[i, 1] = y[i];
+                    this[i, 2] = z[i];
+                }
+            }
+        }
     }
 
     /// Constructs `CoordSequence` from array of supported point types
@@ -212,15 +263,34 @@ struct CoordSequence
     in (seq !is null, "unitialized sequence")
     in (x.length == y.length && (z.length == 0 || z.length == x.length) && x.length == length(), "Lengths don't match")
     {
-        int res;
         if (z.length)
         {
             assert(dimensions() == 3, "Incompatible dimensions");
-            res = GEOSCoordSeq_copyToArrays_r(ctx, seq, x.ptr, y.ptr, z.ptr, null);
+            static if (geosSupport >= GEOSSupport.geos_3_10) {
+                auto res = GEOSCoordSeq_copyToArrays_r(ctx, seq, x.ptr, y.ptr, z.ptr, null);
+                assert(res == 1, "Failed to copy coordinates");
+            }
+            else
+            {
+                for (uint i=0; i<length(); ++i) {
+                    auto res = GEOSCoordSeq_getXYZ_r(ctx, seq, i, &x[i], &y[i], &z[i]);
+                    assert(res == 1, "Failed to copy coordinates");
+                }
+            }
+            return;
+        }
+
+        static if (geosSupport >= GEOSSupport.geos_3_10) {
+            auto res = GEOSCoordSeq_copyToArrays_r(ctx, seq, x.ptr, y.ptr, null, null);
+            assert(res == 1, "Failed to copy coordinates");
         }
         else
-            res = GEOSCoordSeq_copyToArrays_r(ctx, seq, x.ptr, y.ptr, null, null);
-        assert(res == 1, "Failed to copy coordinates");
+        {
+            for (uint i=0; i<length(); ++i) {
+                auto res = GEOSCoordSeq_getXY_r(ctx, seq, i, &x[i], &y[i]);
+                assert(res == 1, "Failed to copy coordinates");
+            }
+        }
     }
 
     /// Copy the contents of a coordinate sequence to a buffer of doubles (XYXY or XYZXYZ)
@@ -228,15 +298,31 @@ struct CoordSequence
     in (seq !is null, "unitialized sequence")
     in (buf.length == length(), "Lengths don't match")
     {
-        int res;
         static if (N == 2)
-            res = GEOSCoordSeq_copyToBuffer_r(ctx, seq, cast(double*)buf.ptr, 0, 0);
+        {
+            static if (geosSupport >= GEOSSupport.geos_3_10) {
+                auto res = GEOSCoordSeq_copyToBuffer_r(ctx, seq, cast(double*)buf.ptr, 0, 0);
+                assert(res == 1, "Failed to copy coordinates");
+            } else {
+                for (uint i=0; i<length(); ++i) {
+                    auto res = GEOSCoordSeq_getXY_r(ctx, seq, i, &buf[i][0], &buf[i][1]);
+                    assert(res == 1, "Failed to copy coordinates");
+                }
+            }
+        }
         else
         {
             assert(dimensions() == 3, "Incompatible dimensions");
-            res = GEOSCoordSeq_copyToBuffer_r(ctx, seq, cast(double*)buf.ptr, 1, 0);
+            static if (geosSupport >= GEOSSupport.geos_3_10) {
+                auto res = GEOSCoordSeq_copyToBuffer_r(ctx, seq, cast(double*)buf.ptr, 1, 0);
+                assert(res == 1, "Failed to copy coordinates");
+            } else {
+                for (uint i=0; i<length(); ++i) {
+                    auto res = GEOSCoordSeq_getXYZ_r(ctx, seq, i, &buf[i][0], &buf[i][1], &buf[i][2]);
+                    assert(res == 1, "Failed to copy coordinates");
+                }
+            }
         }
-        assert(res == 1, "Failed to copy coordinates");
     }
 
     /// Get size info from a coordinate sequence.
@@ -358,6 +444,12 @@ struct CoordSequence
         return point;
     }
 
+    /// Returns RAW GEOS handle to it's CoordSequence type
+    GEOSCoordSequence* handle() @safe nothrow @nogc
+    {
+        return seq;
+    }
+
     private:
     GEOSCoordSequence* seq;
     bool own = true;
@@ -367,8 +459,6 @@ struct CoordSequence
 @("CoordSequence")
 @safe unittest
 {
-    import std.math : isNaN;
-
     // construct with separate dimension arrays
     auto coords = CoordSequence([-1, 1, 1, -1, -1], [-2, -2, 2, 2, -2]);
     assert(coords.dimensions == 2);
@@ -451,17 +541,10 @@ struct Geometry
     alias y = getPointCoordinate!GEOSGeomGetY_r; /// Returns the Y coordinate of a Point geometry
     alias z = getPointCoordinate!GEOSGeomGetZ_r; /// Returns the Z coordinate of a Point geometry
 
-    alias xMin = getPointCoordinate!GEOSGeom_getXMin_r; /// Finds the minimum X value in the geometry.
-    alias xMax = getPointCoordinate!GEOSGeom_getXMax_r; /// Finds the maximum X value in the geometry.
-    alias yMin = getPointCoordinate!GEOSGeom_getYMin_r; /// Finds the minimum Y value in the geometry.
-    alias yMax = getPointCoordinate!GEOSGeom_getYMax_r; /// Finds the maximum Y value in the geometry.
-
-    /// Get the total number of points in a geometry, of any type.
-    int length() const @trusted nothrow @nogc
-    in (g !is null, "unitialized geometry")
-    {
-        return GEOSGetNumCoordinates_r(ctx, g);
-    }
+    alias xmin = getPointCoordinate!GEOSGeom_getXMin_r; /// Finds the minimum X value in the geometry.
+    alias xmax = getPointCoordinate!GEOSGeom_getXMax_r; /// Finds the maximum X value in the geometry.
+    alias ymin = getPointCoordinate!GEOSGeom_getYMin_r; /// Finds the minimum Y value in the geometry.
+    alias ymax = getPointCoordinate!GEOSGeom_getYMax_r; /// Finds the maximum Y value in the geometry.
 
     /**
      * Return the planar dimensionality of the geometry.
@@ -486,26 +569,62 @@ struct Geometry
         }
         else
         {
-            xmin = this.xMin();
-            ymin = this.yMin();
-            xmax = this.xMax();
-            ymax = this.yMax();
+            xmin = this.xmin();
+            ymin = this.ymin();
+            xmax = this.xmax();
+            ymax = this.ymax();
         }
     }
 
     /// ditto
     Extent extent() const @trusted nothrow @nogc
+    in (g !is null, "unitialized geometry")
     {
         Extent ext;
         extent(ext.xmin, ext.ymin, ext.xmax, ext.ymax);
         return ext;
     }
 
+    /// Get the total number of points in a geometry, of any type.
+    uint coordNum() const @trusted nothrow @nogc
+    in (g !is null, "unitialized geometry")
+    {
+        auto r = GEOSGetNumCoordinates_r(ctx, g);
+        assert(r != -1, "Failed to get number of coordinates");
+        return cast(uint)r;
+    }
+
+    /// Return the coordinate sequence underlying the given geometry (Must be a LineString,
+    /// LinearRing or Point).
+    CoordSequence coordSeq() const @trusted nothrow @nogc
+    in (g !is null, "unitialized geometry")
+    {
+        CoordSequence cseq;
+        cseq.seq = cast(GEOSCoordSequence*)GEOSGeom_getCoordSeq_r(ctx, g);
+        assert(cseq.seq !is null, "Failed to get coordinate sequence for geometry");
+        cseq.own = false;
+        return cseq;
+    }
+
+    /**
+     * Return the cartesian dimension of the geometry.
+     *
+     *   * 2 for XY data
+     *   * 3 for XYZ data
+     */
+    uint coordDimensions() const @trusted nothrow @nogc
+    in (g !is null, "unitialized geometry")
+    {
+        auto ret = GEOSGeom_getCoordinateDimension_r(ctx, g);
+        assert(ret.among(2,3), "Failed to determine geometry dimensions");
+        return cast(uint)ret;
+    }
+
     @disable this(this); /// Copy is not allowed - use move() or clone()
 
     ~this() @trusted nothrow @nogc
     {
-        if (g) GEOSGeom_destroy_r(ctx, g);
+        if (g && own) GEOSGeom_destroy_r(ctx, g);
     }
 
     /// Creates an empty Point geometry.
@@ -613,33 +732,282 @@ struct Geometry
                     pholes[i] = h.g;
                 }
                 res.g = GEOSGeom_createPolygon_r(ctx, shell.g, pholes, cast(uint)holes.length);
+                free(pholes);
             }
         }
         else res.g = GEOSGeom_createPolygon_r(ctx, shell.g, null, 0);
-        if (res.g is null) assert(0, "Failed to create LineString");
+        if (res.g is null) assert(0, "Failed to create Polygon");
         shell.g = null; // geometry takes ownership
         foreach (ref h; holes) h.g = null; // for holes too
         return res;
     }
 
-// TODO:
-// GEOSGeometry* GEOSGeom_createCollection (int type, GEOSGeometry **geoms, unsigned int ngeoms)
-// GEOSGeometry* GEOSGeom_createEmptyCollection (int type)
-// GEOSGeometry* GEOSGeom_createRectangle (double xmin, double ymin, double xmax, double ymax)
+    /**
+     * Create a geometry collection.
+     * Created Geometry takes ownership of the supplied ones.
+     */
+    static Geometry createCollection(GEOSGeomTypes type, Geometry[] geoms...) @trusted nothrow @nogc
+    in (ctx !is null, "GEOS thread context not initialized")
+    in (geoms.length, "No source geometry provided")
+    {
+        import core.exception : onOutOfMemoryError;
+        Geometry res;
+
+        // we need to make an array of Geometry pointers first
+        if (geoms.length >= 64)
+        {
+            GEOSGeometry*[64] buf;
+            foreach (i, ref h; geoms) {
+                assert(h.g, "Uninitialized geometry");
+                buf[i] = h.g;
+            }
+            res.g = GEOSGeom_createCollection_r(ctx, type, buf.ptr, cast(uint)geoms.length);
+        }
+        else
+        {
+            auto pgeoms = cast(GEOSGeometry**)malloc((GEOSGeometry*).sizeof * geoms.length);
+            if (!pgeoms) onOutOfMemoryError();
+            foreach (i, ref h; geoms) {
+                assert(h.g, "Uninitialized geometry");
+                pgeoms[i] = h.g;
+            }
+            res.g = GEOSGeom_createCollection_r(ctx, type, pgeoms, cast(uint)geoms.length);
+            free(pgeoms);
+        }
+        if (res.g is null) assert(0, "Failed to create geometry collection");
+        foreach (ref h; geoms) h.g = null; // resulting geometry collection gets ownership of source ones
+        return res;
+    }
+
+    /// Creates an empty geometry collection.
+    static Geometry createEmptyCollection(GEOSGeomTypes type) @trusted nothrow @nogc
+    in (ctx !is null, "GEOS thread context not initialized")
+    {
+        Geometry res;
+        res.g = GEOSGeom_createEmptyCollection_r(ctx, type);
+        if (res.g is null) assert(0, "Failed to create empty geometry collection");
+        return res;
+    }
+
+    /// Create a rectangular polygon from bounding coordinates. Will return a point geometry if width and height are 0.
+    static Geometry createRectangle(double xmin, double ymin, double xmax, double ymax) @trusted nothrow @nogc
+    in (ctx !is null, "GEOS thread context not initialized")
+    in (!xmin.isNaN && !ymin.isNaN && !xmax.isNaN && !ymax.isNaN, "Undefined coordinate provided")
+    {
+        static if (geosSupport >= GEOSSupport.geos_3_11) {
+            Geometry res;
+            res.g = GEOSGeom_createRectangle_r(ctx, type);
+            if (res.g is null) assert(0, "Failed to create empty geometry collection");
+            return res;
+        }
+        else {
+            if (xmin == xmax && ymin == ymax)
+                return createPoint(xmin, ymin);
+            else
+                return createPolygon(createLinearRing(CoordSequence(
+                    Point(xmin, ymin),
+                    Point(xmax, ymin),
+                    Point(xmax, ymax),
+                    Point(xmin, ymax),
+                    Point(xmin, ymin)
+                )));
+        }
+    }
+
+    /// Return the anonymous "user data" for this geometry. User data must be managed by the caller,
+    /// and freed before the geometry is freed.
+    void* userData() const @trusted nothrow @nogc
+    in (g !is null, "unitialized geometry")
+    {
+        return GEOSGeom_getUserData_r(ctx, g);
+    }
+
+    /// Set the anonymous "user data" for this geometry. Don't forget to free the user data before
+    /// freeing the geometry.
+    void userData(void* data) @trusted nothrow @nogc
+    in (g !is null, "unitialized geometry")
+    {
+        GEOSGeom_setUserData_r(ctx, g, data);
+    }
+
+    /// Returns the number of sub-geometries immediately under a multi-geometry or collection or 1
+    /// for a simple geometry. For nested collections, remember to check if returned sub-geometries
+    /// are themselves also collections.
+    int numGeometries() const @trusted nothrow @nogc
+    in (g !is null, "unitialized geometry")
+    {
+        return GEOSGetNumGeometries_r(ctx, g);
+    }
+
+    /// Returns the specified sub-geometry of a collection. For a simple geometry, returns itself.
+    /// Warning: returned geometry must not be used after original geometry is discarded (as internal pointer would be invalid)
+    Geometry geometry(int idx) const @trusted nothrow @nogc
+    in (idx < numGeometries(), "Invalid index")
+    {
+        Geometry ret;
+        ret.g = cast(GEOSGeom_t*)GEOSGetGeometryN_r(ctx, g, idx);
+        assert(ret.g !is null, "Failed to get indexed subgeometry");
+        ret.own = false;
+        return ret;
+    }
+
+    /**
+     * Organize the elements, rings, and coordinate order of geometries in a consistent way, so that
+     * geometries that represent the same object can be easily compared. Modifies the geometry
+     * in-place.
+     *
+     * Normalization ensures the following:
+     *
+     *   * Lines are oriented to have smallest coordinate first (apart from duplicate endpoints)
+     *   * Rings start with their smallest coordinate (using XY ordering)
+     *   * Polygon shell rings are oriented CW, and holes CCW
+     *   * Collection elements are sorted by their first coordinate
+     *
+     * Use before calling `equalsExact` to avoid false "not equal" results.
+     */
+    void normalize() @trusted nothrow @nogc
+    in (g !is null, "unitialized geometry")
+    {
+        auto r = GEOSNormalize_r(ctx, g);
+        assert(r == 0, "Failed to normalize geometry");
+    }
+
+    static if (geosSupport >= GEOSSupport.geos_3_11)
+    {
+        /**
+        * Works from start of each coordinate sequence in the geometry, retaining points that are
+        * further away from the previous retained point than the tolerance value.
+        *
+        * Removing repeated points with a non-zero tolerance may result in an invalid geometry being
+        * returned. Be sure to check and repair validity.
+        *
+        * Returns:
+        *     A geometry with all points within the tolerance of each other removed.
+        */
+        Geometry removeRepeatedpoints(double tolerance = 0.0) const @trusted nothrow @nogc
+        in (g !is null, "unitialized geometry")
+        {
+            Geometry ret;
+            ret.g = GEOSRemoveRepeatedPoints_r(ctx, g, tolerance);
+            assert(ret.g !is null, "Failed to remove repeated points");
+            return ret;
+        }
+    }
 
     /// Tests whether the input geometry is empty. If the geometry or any component is non-empty,
     /// the geometry is non-empty. An empty geometry has no boundary or interior.
     bool isEmpty() const @trusted nothrow @nogc
     in (g !is null, "unitialized geometry")
     {
-        return GEOSisEmpty_r(ctx, g) == 1;
+        auto ret = GEOSisEmpty_r(ctx, g);
+        assert(ret.among(0, 1), "Failed to check if geometry is empty");
+        return ret == 1;
+    }
+
+    /// Tests whether the input geometry is a ring. Rings are linestrings, without
+    /// self-intersections, with start and end point being identical.
+    bool isRing() const @trusted nothrow @nogc
+    in (g !is null, "unitialized geometry")
+    {
+        auto ret = GEOSisRing_r(ctx, g);
+        assert(ret.among(0, 1), "Failed to check if geometry is ring");
+        return ret == 1;
+    }
+
+    /// Tests whether the input geometry has z coordinates.
+    bool hasZ() const @trusted nothrow @nogc
+    in (g !is null, "unitialized geometry")
+    {
+        auto ret = GEOSHasZ_r(ctx, g);
+        assert(ret.among(0, 1), "Failed to check if geometry has Z");
+        return ret == 1;
+    }
+
+    /// Tests whether the input geometry is closed. A closed geometry is a linestring or
+    /// multilinestring with the start and end points being the same.
+    bool isClosed() const @trusted nothrow @nogc
+    in (g !is null, "unitialized geometry")
+    {
+        auto ret = GEOSisClosed_r(ctx, g);
+        assert(ret.among(0, 1), "Failed to check if geometry is closed");
+        return ret == 1;
+    }
+
+    /// Tests whether the input geometry is "simple". Mostly relevant for linestrings. A "simple"
+    /// linestring has no self-intersections.
+    bool isSimple() const @trusted nothrow @nogc
+    in (g !is null, "unitialized geometry")
+    {
+        auto ret = GEOSisSimple_r(ctx, g);
+        assert(ret.among(0, 1), "Failed to check if geometry is simple");
+        return ret == 1;
+    }
+
+    /**
+     * Check the validity of the provided geometry.
+     *
+     *   * All points are valid.
+     *   * All non-zero-length linestrings are valid.
+     *   * Polygon rings must be non-self-intersecting, and interior rings contained within exterior rings.
+     *   * Multi-polygon components may not touch or overlap.
+     */
+    bool isValid() const @trusted nothrow @nogc
+    in (g !is null, "unitialized geometry")
+    {
+        auto ret = GEOSisValid_r(ctx, g);
+        assert(ret.among(0, 1), "Failed to check if geometry is valid");
+        return ret == 1;
+    }
+
+    /// Return the human readable reason a geometry is invalid, "Valid Geometry" string otherwise.
+    GeosString isValidReason() const @trusted nothrow @nogc
+    in (g !is null, "unitialized geometry")
+    {
+        auto c = GEOSisValidReason_r(ctx, g);
+        assert(c !is null, "Failed to check if geometry is valid");
+        return GeosString(c);
+    }
+
+    /// In one step, calculate and return the validity, the human readable validity reason and a
+    /// point at which validity rules are broken.
+    bool isValidDetail(out GeosString reason, out Geometry location) const @trusted nothrow @nogc
+    in (g !is null, "unitialized geometry")
+    {
+        char* c;
+        GEOSGeometry* g;
+        auto ret = GEOSisValidDetail_r(ctx, g, 0, &c, &g);
+        assert(ret.among(0, 1), "Failed to check if geometry is valid");
+        if (c) reason = GeosString(c);
+        if (g) location.g = g;
+        return ret == 1;
+    }
+
+    /// True if geometries cover the same space on the place.
+    bool equals(const Geometry other) const @trusted nothrow @nogc
+    in (g !is null && other.g !is null, "unitialized geometry")
+    {
+        auto r = GEOSEquals_r(ctx, this.g, other.g);
+        assert(r.among(0, 1), "Failed to determine if geometries are equal");
+        return r == 1;
+    }
+
+    /// Determine pointwise equivalence of two geometries, by checking that they have identical
+    /// structure and that each vertex of g2 is within the distance tolerance of the corresponding
+    /// vertex in g1. Unlike GEOSEquals(), geometries that are topologically equivalent but have
+    /// different representations (e.g., LINESTRING (0 0, 1 1) and MULTILINESTRING ((0 0, 1 1)) )
+    /// are not considered equal by GEOSEqualsExact().
+    bool equalsExact(const Geometry other, double tolerance = 0.0) const @trusted nothrow @nogc
+    in (g !is null && other.g !is null, "unitialized geometry")
+    {
+        auto r = GEOSEqualsExact_r(ctx, this.g, other.g, tolerance);
+        assert(r.among(0, 1), "Failed to determine if geometries are equal");
+        return r == 1;
     }
 
     /// Generates geometry as [WKT](https://libgeos.org/specifications/wkt/) string
     void toString(S)(auto ref S sink) const @trusted
     in (g !is null, "unitialized geometry")
     {
-        import core.stdc.string : strlen;
         char* s = GEOSWKTWriter_write_r(ctx, wktWriter, g);
         if (s is null) assert(0, "Failed to generate WKT from geometry");
         sink(s[0..strlen(s)]);
@@ -650,7 +1018,6 @@ struct Geometry
     string toString() const @trusted
     in (g !is null, "unitialized geometry")
     {
-        import core.stdc.string : strlen;
         char* s = GEOSWKTWriter_write_r(ctx, wktWriter, g);
         if (s is null) assert(0, "Failed to generate WKT from geometry");
         string str = s[0..strlen(s)].idup;
@@ -658,8 +1025,35 @@ struct Geometry
         return str;
     }
 
+    /// Returns RAW GEOS handle to it's Geometry type
+    GEOSGeometry* handle() @safe nothrow @nogc
+    {
+        return g;
+    }
+
+    /// Calculate the area of a geometry.
+    double area() const @trusted nothrow @nogc
+    in (g !is null, "unitialized geometry")
+    {
+        double area;
+        auto ret = GEOSArea_r(ctx, g, &area);
+        assert(ret == 1, "Error calculating geometry area");
+        return area;
+    }
+
+    /// Calculate the length of a geometry.
+    double length() const @trusted nothrow @nogc
+    in (g !is null, "unitialized geometry")
+    {
+        double len;
+        auto ret = GEOSLength_r(ctx, g, &len);
+        assert(ret == 1, "Error calculating geometry length");
+        return len;
+    }
+
     private:
     GEOSGeometry* g;
+    bool own = true;
 
     double getPointCoordinate(alias fn)() const @trusted nothrow @nogc
     in (g !is null, "unitialized geometry")
@@ -679,7 +1073,6 @@ unittest
 {
     import core.lifetime : move;
     import std.array : Appender;
-    import std.math : isNaN;
 
     // Point from x, y
     auto point = Geometry.createPoint(1, 2);
@@ -691,18 +1084,25 @@ unittest
     assert(point.x == 1);
     assert(point.y == 2);
     assert(point.z.isNaN);
-    assert(point.length == 1);
+    assert(point.coordNum == 1);
     assert(point.dimensions == 0);
-    assert(point.xMin == 1);
-    assert(point.xMax == 1);
-    assert(point.yMin == 2);
-    assert(point.yMax == 2);
+    assert(point.xmin == 1);
+    assert(point.xmax == 1);
+    assert(point.ymin == 2);
+    assert(point.ymax == 2);
 
     auto ext = point.extent();
     assert(ext.xmin == 1);
     assert(ext.xmax == 1);
     assert(ext.ymin == 2);
     assert(ext.ymax == 2);
+
+    () @trusted
+    {
+        int data = 42;
+        point.userData = &data;
+        assert (point.userData == &data);
+    }();
 
     // WKT string generation
     Appender!string buf;
@@ -727,7 +1127,35 @@ unittest
 @safe
 unittest
 {
+    auto g = Geometry.createLineString(CoordSequence(Point(1,2), Point(3,4)));
+    assert(g.typeId == GEOSGeomTypes.GEOS_LINESTRING);
+    // assert(g[0].x == 1);
+    // assert(g[0].y == 2);
+    // assert(g[1].x == 3);
+    // assert(g[1].y == 4);
+}
 
+/// Corresponds with PostGIS output numbers
+enum LineCrossingDirection
+{
+    noCross = 0,
+    left = -1,
+    right = 1,
+    multicrossLeft = -2,
+    multicrossRight = 2,
+    multicrossFirstLeft = -3,
+    multicrossFirstRight = 3
+}
+
+/**
+ * Determines direction in which the line A is crossed by line B.
+ * See: [ST_LineCrossingDirection](https://postgis.net/docs/ST_LineCrossingDirection.html)
+ */
+LineCrossingDirection lineCrossingDirection(ref const Geometry lineA, ref const Geometry lineB)
+{
+    //TODO: https://github.com/postgis/postgis/blob/f6def67654c25d812446239036cee44812613748/liblwgeom/lwalgorithm.c
+    // https://github.com/postgis/postgis/blob/45e491242d9d63beb7eac0961b16439d00c93bd4/liblwgeom/cunit/cu_algorithm.c
+    return LineCrossingDirection.noCross;
 }
 
 private:
