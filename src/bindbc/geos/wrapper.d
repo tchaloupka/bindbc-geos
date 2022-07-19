@@ -8,7 +8,7 @@ import core.stdc.stdio;
 import core.stdc.stdlib;
 import core.stdc.string : strlen;
 import bindbc.geos.libgeos;
-import std.algorithm : among;
+import std.algorithm : among, max, min;
 import std.math : isNaN;
 
 enum MessageLevel { notice, error }
@@ -30,6 +30,8 @@ void initGEOS(MessageHandler handler = null) @trusted nothrow @nogc
     if (handler !is null) msgHandler = handler;
     GEOSContext_setNoticeHandler_r(ctx, &msgHandlerImpl!(MessageLevel.notice));
     GEOSContext_setErrorHandler_r(ctx, &msgHandlerImpl!(MessageLevel.error));
+    wktReader = GEOSWKTReader_create_r(ctx);
+    if (wktReader is null) assert(0, "Failed to create WKT reader");
     wktWriter = GEOSWKTWriter_create_r(ctx);
     if (wktWriter is null) assert(0, "Failed to create WKT writer");
     GEOSWKTWriter_setTrim_r(ctx, wktWriter, 1); // enable trailing 0 trimming
@@ -39,7 +41,9 @@ void initGEOS(MessageHandler handler = null) @trusted nothrow @nogc
 void finishGEOS() @trusted nothrow @nogc
 {
     assert(ctx !is null, "GEOS context not initialized");
+    assert(wktReader !is null, "WKT reader not initialized");
     assert(wktWriter !is null, "WKT writer not initialized");
+    GEOSWKTReader_destroy_r(ctx, wktReader);
     GEOSWKTWriter_destroy_r(ctx, wktWriter);
     GEOS_finish_r(ctx);
 }
@@ -80,6 +84,12 @@ union PointXYZ(int dims) if (dims.among(2, 3))
             this.y = y;
             this.z = z;
         }
+
+        /// Converts to 2D point
+        Point point2d() @safe pure nothrow @nogc
+        {
+            return Point(x, y);
+        }
     }
     else
     {
@@ -89,6 +99,19 @@ union PointXYZ(int dims) if (dims.among(2, 3))
             this.x = x;
             this.y = y;
         }
+    }
+
+    auto opAssign(P)(auto ref P p) if (is(P : PointZ) || is(P : Point))
+    {
+        this.x = p.x;
+        this.y = p.y;
+        static if (dims == 3) {
+            static if (is(P : PointZ))
+                this.z = p.z;
+            else
+                this.z = double.init;
+        }
+        return this;
     }
 
     double[dims] coords;
@@ -537,14 +560,14 @@ struct Geometry
         return c;
     }
 
-    alias x = getPointCoordinate!GEOSGeomGetX_r; /// Returns the X coordinate of a Point geometry
-    alias y = getPointCoordinate!GEOSGeomGetY_r; /// Returns the Y coordinate of a Point geometry
-    alias z = getPointCoordinate!GEOSGeomGetZ_r; /// Returns the Z coordinate of a Point geometry
+    alias x = getCoordinate!GEOSGeomGetX_r; /// Returns the X coordinate of a Point geometry
+    alias y = getCoordinate!GEOSGeomGetY_r; /// Returns the Y coordinate of a Point geometry
+    alias z = getCoordinate!GEOSGeomGetZ_r; /// Returns the Z coordinate of a Point geometry
 
-    alias xmin = getPointCoordinate!GEOSGeom_getXMin_r; /// Finds the minimum X value in the geometry.
-    alias xmax = getPointCoordinate!GEOSGeom_getXMax_r; /// Finds the maximum X value in the geometry.
-    alias ymin = getPointCoordinate!GEOSGeom_getYMin_r; /// Finds the minimum Y value in the geometry.
-    alias ymax = getPointCoordinate!GEOSGeom_getYMax_r; /// Finds the maximum Y value in the geometry.
+    alias xmin = getCoordinate!GEOSGeom_getXMin_r; /// Finds the minimum X value in the geometry.
+    alias xmax = getCoordinate!GEOSGeom_getXMax_r; /// Finds the maximum X value in the geometry.
+    alias ymin = getCoordinate!GEOSGeom_getYMin_r; /// Finds the minimum Y value in the geometry.
+    alias ymax = getCoordinate!GEOSGeom_getYMax_r; /// Finds the maximum Y value in the geometry.
 
     /**
      * Return the planar dimensionality of the geometry.
@@ -620,11 +643,29 @@ struct Geometry
         return cast(uint)ret;
     }
 
+    /**
+     * Initializes geometry from Well Known Text (WKT) format.
+     * If creation fails, resulting Geometry would be uninitialized.
+     */
+    this(const(char)[] wkt) nothrow @nogc @trusted
+    in (ctx !is null, "GEOS thread context not initialized")
+    in (wkt.length, "Empty WKT")
+    {
+        import std.internal.cstring : tempCString;
+        this.g = GEOSWKTReader_read_r(ctx, wktReader, wkt.tempCString);
+    }
+
     @disable this(this); /// Copy is not allowed - use move() or clone()
 
     ~this() @trusted nothrow @nogc
     {
         if (g && own) GEOSGeom_destroy_r(ctx, g);
+    }
+
+    /// Checks if the Geometry is initialized
+    bool opCast(T)() const if (is(T == bool))
+    {
+        return g !is null;
     }
 
     /// Creates an empty Point geometry.
@@ -1055,9 +1096,8 @@ struct Geometry
     GEOSGeometry* g;
     bool own = true;
 
-    double getPointCoordinate(alias fn)() const @trusted nothrow @nogc
+    double getCoordinate(alias fn)() const @trusted nothrow @nogc
     in (g !is null, "unitialized geometry")
-    in (typeId() == GEOSGeomTypes.GEOS_POINT, "Operation is valid only on Point geometry")
     {
         double coord = void;
         auto r = fn(ctx, g, &coord);
@@ -1129,38 +1169,267 @@ unittest
 {
     auto g = Geometry.createLineString(CoordSequence(Point(1,2), Point(3,4)));
     assert(g.typeId == GEOSGeomTypes.GEOS_LINESTRING);
-    // assert(g[0].x == 1);
-    // assert(g[0].y == 2);
-    // assert(g[1].x == 3);
-    // assert(g[1].y == 4);
+    assert(g.xmin == 1);
+    assert(g.ymin == 2);
+    assert(g.xmax == 3);
+    assert(g.ymax == 4);
 }
 
 /// Corresponds with PostGIS output numbers
-enum LineCrossingDirection
+enum LineCrossDirection
 {
-    noCross = 0,
-    left = -1,
-    right = 1,
-    multicrossLeft = -2,
-    multicrossRight = 2,
-    multicrossFirstLeft = -3,
-    multicrossFirstRight = 3
+    noCross = 0,                /// No crossing between lines
+    left = -1,                  /// Line crosses the first one to the left
+    right = 1,                  /// Line crosses the first one to the right
+    multicrossLeft = -2,        /// Lines have multiple crosses, but at the end line is crossed to the left
+    multicrossRight = 2,        /// Lines have multiple crosses, but at the end line is crossed to the right
+    multicrossFirstLeft = -3,   /// Lines have multiple crosses with no side change, but first cross was to the left
+    multicrossFirstRight = 3    /// Lines have multiple crosses with no side change, but first cross was to the right
 }
 
 /**
  * Determines direction in which the line A is crossed by line B.
- * See: [ST_LineCrossingDirection](https://postgis.net/docs/ST_LineCrossingDirection.html)
+ *
+ * Only linestring geometries are valid as input.
  */
-LineCrossingDirection lineCrossingDirection(ref const Geometry lineA, ref const Geometry lineB)
+LineCrossDirection lineCrossingDirection(ref const Geometry lineA, ref const Geometry lineB) @safe nothrow @nogc
+in (lineA.typeId == GEOSGeomTypes.GEOS_LINESTRING && lineB.typeId == GEOSGeomTypes.GEOS_LINESTRING, "Geometry must be of LINESTRING type")
 {
-    //TODO: https://github.com/postgis/postgis/blob/f6def67654c25d812446239036cee44812613748/liblwgeom/lwalgorithm.c
-    // https://github.com/postgis/postgis/blob/45e491242d9d63beb7eac0961b16439d00c93bd4/liblwgeom/cunit/cu_algorithm.c
-    return LineCrossingDirection.noCross;
+    enum
+    {
+        SEG_NO_INTERSECTION = 0,
+        SEG_COLINEAR = 1,
+        SEG_CROSS_LEFT = 2,
+        SEG_CROSS_RIGHT = 3
+    }
+
+    // check if segment envelopes has some overlapping
+    static bool segInteract(const Point p1, const Point p2, const Point q1, const Point q2) nothrow @nogc @safe pure
+    {
+        pragma(inline, true);
+        double minq = min(q1.x, q2.x);
+        double maxq = max(q1.x, q2.x);
+        double minp = min(p1.x, p2.x);
+        double maxp = max(p1.x, p2.x);
+
+        if (minp > maxq || maxp < minq)
+            return false;
+
+        minq = min(q1.y, q2.y);
+        maxq = max(q1.y, q2.y);
+        minp = min(p1.y, p2.y);
+        maxp = max(p1.y, p2.y);
+
+        if (minp > maxq || maxp < minq)
+            return false;
+
+        return true;
+    }
+
+    /*
+     * Return -1  if point Q is left of segment P
+     * Return  1  if point Q is right of segment P
+     * Return  0  if point Q in on segment P
+     */
+    static int segmentSide(const Point p1, const Point p2, const Point q) @safe nothrow @nogc pure
+    {
+        pragma(inline, true);
+        double side = ( (q.x - p1.x) * (p2.y - p1.y) - (p2.x - p1.x) * (q.y - p1.y) );
+        return (side > 0) - (side < 0);
+    }
+
+    // returns the kind of crossing behavior of line segment 1 (constructed from p1 and p2) and line
+    // segment 2 (constructed from q1 and q2)
+    static int segmentIntersects(const Point p1, const Point p2, const Point q1, const Point q2) nothrow @nogc @safe pure
+    {
+        pragma(inline, true);
+
+        // No envelope interaction => we are done
+        if (!segInteract(p1, p2, q1, q2)) return SEG_NO_INTERSECTION;
+
+        // Are the start and end points of q on the same side of p?
+        auto pq1 = segmentSide(p1, p2, q1);
+        auto pq2 = segmentSide(p1, p2, q2);
+        if ((pq1>0 && pq2>0) || (pq1<0 && pq2<0)) return SEG_NO_INTERSECTION;
+
+        // Are the start and end points of p on the same side of q?
+        auto qp1 = segmentSide(q1, q2, p1);
+        auto qp2 = segmentSide(q1, q2, p2);
+        if ((qp1>0 && qp2>0) || (qp1<0 && qp2<0)) return SEG_NO_INTERSECTION;
+
+        // Nobody is on one side or another? Must be colinear.
+        if (pq1 == 0 && pq2 == 0 && qp1 == 0 && qp2 == 0) return SEG_COLINEAR;
+
+        // Second point of p or q touches, it's not a crossing.
+        if (pq2 == 0 || qp2 == 0) return SEG_NO_INTERSECTION;
+
+        // First point of p touches, it's a "crossing"
+        if (pq1 == 0)
+            return pq2 > 0 ? SEG_CROSS_RIGHT : SEG_CROSS_LEFT;
+
+        // First point of q touches, it's a crossing.
+        if (qp1 == 0)
+            return pq1 < pq2 ? SEG_CROSS_RIGHT : SEG_CROSS_LEFT;
+
+        // The segments cross, what direction is the crossing?
+        return pq1 < pq2 ? SEG_CROSS_RIGHT : SEG_CROSS_LEFT;
+    }
+
+    auto ptsA = lineA.coordSeq();
+    auto ptsB = lineB.coordSeq();
+
+    // One-point lines can't intersect (and shouldn't exist)
+    if (ptsA.length < 2 || ptsB.length < 2) return LineCrossDirection.noCross;
+
+	int leftCrosses = 0;
+	int rightCrosses = 0;
+	int firstCross = 0;
+
+    Point p1, p2, q1, q2;
+    q1 = ptsB[0];
+
+    for (uint i = 1; i < ptsB.length; i++)
+    {
+        // Update second point of q to next value
+        q2 = ptsB[i];
+
+        /// Initialize first point of p
+        p1 = ptsA[0];
+        for (uint j = 1; j < ptsA.length; j++)
+        {
+            /// Update second point of p to next value
+            p2 = ptsA[j];
+
+            int cross = segmentIntersects(p1, p2, q1, q2);
+
+            if (cross == SEG_CROSS_LEFT)
+            {
+                leftCrosses++;
+                if (!firstCross)
+                    firstCross = SEG_CROSS_LEFT;
+            }
+            else if (cross == SEG_CROSS_RIGHT)
+            {
+                rightCrosses++;
+                if (!firstCross)
+                    firstCross = SEG_CROSS_LEFT;
+            }
+            else if (cross == SEG_COLINEAR)
+            {
+                // TODO: Crossing at a co-linearity can be handled by extending
+                // segment to next vertex and seeing if the end points straddle
+                // the co-linear segment.
+                // continue;
+            }
+
+            // Prepare new line segment start point
+            p1 = p2;
+        }
+
+        // Prepare new line segment start point
+        q1 = q2;
+    }
+
+    if (!leftCrosses && !rightCrosses) return LineCrossDirection.noCross;
+
+    if (!leftCrosses  && rightCrosses == 1) return LineCrossDirection.right;
+    if (!rightCrosses && leftCrosses  == 1) return LineCrossDirection.left;
+
+    if (leftCrosses - rightCrosses > 0) return LineCrossDirection.multicrossLeft;
+    if (leftCrosses - rightCrosses < 0) return LineCrossDirection.multicrossRight;
+
+    if (leftCrosses - rightCrosses == 0 && firstCross == SEG_CROSS_LEFT) return LineCrossDirection.multicrossFirstLeft;
+    if (leftCrosses - rightCrosses == 0 && firstCross == SEG_CROSS_RIGHT) return LineCrossDirection.multicrossFirstRight;
+
+    return LineCrossDirection.noCross;
+}
+
+@("lineCrossingDirection - single segment")
+@safe nothrow @nogc unittest
+{
+    // Vertical line segment from 0,0 to 0,1
+    auto l1 = Geometry.createLineString(CoordSequence(Point(0,0), Point(0,1)));
+    assert(lineCrossingDirection(l1, l1) == LineCrossDirection.noCross);
+
+    // Horizontal line segment - crossing in the middle
+    auto l2 = Geometry.createLineString(CoordSequence(Point(-0.5, 0.5), Point(0.5, 0.5)));
+    assert(lineCrossingDirection(l1, l2) == LineCrossDirection.right);
+    assert(lineCrossingDirection(l2, l1) == LineCrossDirection.left);
+
+    // reverted direction
+    l2 = Geometry.createLineString(CoordSequence(Point(0.5, 0.5), Point(-0.5, 0.5)));
+    assert(lineCrossingDirection(l1, l2) == LineCrossDirection.left);
+    assert(lineCrossingDirection(l2, l1) == LineCrossDirection.right);
+
+    // Horizontal line segment - crossing at top end vertex (end crossings don't count)
+    l2 = Geometry.createLineString(CoordSequence(Point(-0.5, 1), Point(0.5, 1)));
+    assert(lineCrossingDirection(l1, l2) == LineCrossDirection.noCross);
+
+    // Horizontal line segment - crossing at bottom end vertex
+    l2 = Geometry.createLineString(CoordSequence(Point(-0.5, 0), Point(0.5, 0)));
+    assert(lineCrossingDirection(l1, l2) == LineCrossDirection.right);
+
+    // Horizontal line segment - no crossing
+    l2 = Geometry.createLineString(CoordSequence(Point(-0.5, 2), Point(0.5, 2)));
+    assert(lineCrossingDirection(l1, l2) == LineCrossDirection.noCross);
+
+    // Vertical line segment - no crossing
+    l2 = Geometry.createLineString(CoordSequence(Point(-0.5, 0), Point(-0.5, 1)));
+    assert(lineCrossingDirection(l1, l2) == LineCrossDirection.noCross);
+}
+
+@("lineCrossingDirection - long lines")
+@safe nothrow @nogc unittest
+{
+    // Vertical line with vertices at y integers
+    auto l1 = Geometry("LINESTRING(0 0, 0 1, 0 2, 0 3, 0 4)");
+
+    // Two crossings at segment midpoints
+    auto l2 = Geometry("LINESTRING(1 1, -1 1.5, 1 3, 1 4, 1 5)");
+    assert(lineCrossingDirection(l1, l2) == LineCrossDirection.multicrossFirstLeft);
+
+    // One crossing at interior vertex
+    l2 = Geometry("LINESTRING(1 1, 0 1, -1 1, -1 2, -1 3)");
+    assert(lineCrossingDirection(l1, l2) == LineCrossDirection.left);
+
+    // Two crossings at interior vertices
+    l2 = Geometry("LINESTRING(1 1, 0 1, -1 1, 0 3, 1 3)");
+    assert(lineCrossingDirection(l1, l2) == LineCrossDirection.multicrossFirstLeft);
+
+    // Two crossings, one at the first vertex on at interior vertex
+    l2 = Geometry("LINESTRING(1 0, 0 0, -1 1, 0 3, 1 3)");
+    assert(lineCrossingDirection(l1, l2) == LineCrossDirection.multicrossFirstLeft);
+
+    // Two crossings, one at the first vertex on the next interior vertex
+    l2 = Geometry("LINESTRING(1 0, 0 0, -1 1, 0 1, 1 2)");
+    assert(lineCrossingDirection(l1, l2) == LineCrossDirection.multicrossFirstLeft);
+
+    // Three crossings, two at midpoints, one at vertex
+    l2 = Geometry("LINESTRING(0.5 1, -1 0.5, 1 2, -1 2, -1 3)");
+    assert(lineCrossingDirection(l1, l2) == LineCrossDirection.multicrossLeft);
+
+    // One mid-point co-linear crossing
+    l2 = Geometry("LINESTRING(1 1, 0 1.5, 0 2.5, -1 3, -1 4)");
+    assert(lineCrossingDirection(l1, l2) == LineCrossDirection.left);
+
+    // One on-vertices co-linear crossing
+    l2 = Geometry("LINESTRING(1 1, 0 1, 0 2, -1 4, -1 4)");
+    assert(lineCrossingDirection(l1, l2) == LineCrossDirection.left);
+
+    // No crossing, but end on a co-linearity
+    l2 = Geometry("LINESTRING(1 1, 1 2, 1 3, 0 3, 0 4)");
+    assert(lineCrossingDirection(l1, l2) == LineCrossDirection.noCross);
+
+    // Real life sample
+    l1 = Geometry("LINESTRING(2.99 90.16,71 74,20 140,171 154)");
+	l2 = Geometry("LINESTRING(25 169,89 114,40 70,86 43)");
+    assert(lineCrossingDirection(l1, l2) == LineCrossDirection.multicrossRight);
 }
 
 private:
 GEOSContextHandle_t ctx; // thread GEOS context
 GEOSWKTWriter* wktWriter;
+GEOSWKTReader* wktReader;
 MessageHandler msgHandler = &defaultMessageHandler;
 
 void defaultMessageHandler(MessageLevel lvl, const(char)[] msg) @trusted nothrow @nogc
