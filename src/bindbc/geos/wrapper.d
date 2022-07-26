@@ -3,6 +3,7 @@
  */
 module bindbc.geos.wrapper;
 
+import core.lifetime : move;
 import core.stdc.stdarg;
 import core.stdc.stdio;
 import core.stdc.stdlib;
@@ -456,8 +457,10 @@ struct CoordSequence
         else
         {
             static if (is(typeof(point.z) : double)) {
-                assert(dimensions() == 3, "Incompatible dimensions");
-                res = GEOSCoordSeq_setXYZ_r(ctx, seq, cast(uint)idx, cast(double)point.x, cast(double)point.y, cast(double)point.z);
+                if (dimensions() == 2)
+                    res = GEOSCoordSeq_setXY_r(ctx, seq, cast(uint)idx, cast(double)point.x, cast(double)point.y);
+                else
+                    res = GEOSCoordSeq_setXYZ_r(ctx, seq, cast(uint)idx, cast(double)point.x, cast(double)point.y, cast(double)point.z);
             } else {
                 assert(dimensions() == 2, "Incompatible dimensions");
                 res = GEOSCoordSeq_setXY_r(ctx, seq, cast(uint)idx, cast(double)point.x, cast(double)point.y);
@@ -679,13 +682,39 @@ struct Geometry
     }
 
     /// Creates a Point geometry from a pair of coordinates.
-    static Geometry createPoint(double x, double y) @trusted nothrow @nogc
+    static Geometry createPoint(double x, double y, double z = double.init) @trusted nothrow @nogc
     in (ctx !is null, "GEOS thread context not initialized")
+    in (!x.isNaN && !y.isNaN, "Invalid coordinates")
     {
         Geometry res;
-        res.g = GEOSGeom_createPointFromXY_r(ctx, x, y);
-        if (res.g is null) assert(0, "Failed to create Point");
-        return res;
+        if (z.isNaN)
+        {
+            res.g = GEOSGeom_createPointFromXY_r(ctx, x, y);
+            if (res.g is null) assert(0, "Failed to create Point");
+            return res.move();
+        }
+        else
+        {
+            auto coords = CoordSequence(1, 3);
+            coords[0] = PointZ(x, y, z);
+            return createPoint(coords.move);
+        }
+    }
+
+    /// Creates a Point geometry from a pair of coordinates.
+    static Geometry createPoint(P)(auto ref P pt) @trusted nothrow @nogc
+        if (isPoint!P)
+    {
+        static if (isPointStruct!P)
+        {
+            static if (is(typeof(pt.z) : double)) return createPoint(pt.x, pt.y, pt.z);
+            else return createPoint(pt.x, pt.y);
+        }
+        else
+        {
+            if (pt.length == 3) return createPoint(pt[0], pt[1], pt[2]);
+            else return createPoint(pt[0], pt[1]);
+        }
     }
 
     /// Creates a Point geometry from `CoordSequence`
@@ -1092,6 +1121,52 @@ struct Geometry
         return len;
     }
 
+    /**
+     * Appends point or linestring to the Geometry.
+     * If geometry is uninitialized, it would be initialized with the provided geometry.
+     * Otherwise provided point(s) would be appended to the end of the current ones.
+     *
+     * Only valid for Point or Linestring geometries.
+     */
+    void opOpAssign(string op, T)(auto ref T value) @trusted if (op=="~" && (isPoint!T || is(T == Geometry)))
+    in (!this || typeId.among(GEOSGeomTypes.GEOS_POINT, GEOSGeomTypes.GEOS_LINESTRING), "Unsupported operation")
+    {
+        static if (is(T == Geometry)) {
+            assert(
+                value && value.typeId.among(GEOSGeomTypes.GEOS_POINT, GEOSGeomTypes.GEOS_LINESTRING),
+                "Invalid input geometry");
+        }
+
+        if (!this)
+        {
+            static if (is(T == Geometry)) this = value.clone();
+            else this = createPoint(value);
+        }
+        else
+        {
+            static if (isPoint!T)
+            {
+                auto newCoords = CoordSequence(this.coordNum+1, this.coordDimensions);
+                auto coords = this.coordSeq;
+                for (uint i=0; i<coords.length; i++)
+                    newCoords[i] = coords[i];
+                newCoords[coords.length] = value;
+                this = Geometry.createLineString(newCoords.move());
+            }
+            else
+            {
+                auto newCoords = CoordSequence(this.coordNum+value.coordNum, this.coordDimensions);
+                auto coords = this.coordSeq;
+                auto gcoords = value.coordSeq;
+                for (uint i; i<coords.length; i++)
+                    newCoords[i] = coords[i];
+                for (uint i; i<gcoords.length; i++)
+                    newCoords[coords.length + i] = gcoords[i];
+                this = Geometry.createLineString(newCoords.move);
+            }
+        }
+    }
+
     private:
     GEOSGeometry* g;
     bool own = true;
@@ -1173,6 +1248,35 @@ unittest
     assert(g.ymin == 2);
     assert(g.xmax == 3);
     assert(g.ymax == 4);
+}
+
+@("Linestring append")
+@safe
+unittest
+{
+    Geometry a;
+    a ~= Point(1,2);
+    auto s = a.toString();
+    assert(s == "POINT (1 2)", s);
+    a ~= Point(3, 4);
+    s = a.toString();
+    assert(s == "LINESTRING (1 2, 3 4)", s);
+
+    Geometry b = Geometry("LINESTRING(11 22, 33 44)");
+    a ~= b;
+    s = a.toString();
+    assert(s == "LINESTRING (1 2, 3 4, 11 22, 33 44)", s);
+    s = b.toString();
+    assert(s == "LINESTRING (11 22, 33 44)", s);
+    a = Geometry.createPoint(1, 2);
+    a ~= b;
+    s = a.toString();
+    assert(s == "LINESTRING (1 2, 11 22, 33 44)", s);
+
+    a = Geometry.init;
+    a ~= b;
+    s = a.toString();
+    assert(s == "LINESTRING (11 22, 33 44)", s);
 }
 
 /// Corresponds with PostGIS output numbers
