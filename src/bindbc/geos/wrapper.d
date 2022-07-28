@@ -470,6 +470,17 @@ struct CoordSequence
         return point;
     }
 
+    /// Returns new CoordSequence instance from sliced coordinates
+    CoordSequence opSlice(uint start, uint end) @trusted nothrow @nogc
+    in (seq !is null, "unitialized sequence")
+    in (start >= 0 && end <= length, "invalid index")
+    {
+        CoordSequence res = CoordSequence(end - start, this.dimensions);
+        for (size_t i = start; i<end; i++)
+            res[i-start] = this[i];
+        return res;
+    }
+
     /// Returns RAW GEOS handle to it's CoordSequence type
     GEOSCoordSequence* handle() @safe nothrow @nogc
     {
@@ -499,6 +510,15 @@ struct CoordSequence
     assert(coords[1].z.isNaN);
     coords[0, 0] = 42;
     assert(coords[0, 0] == 42);
+
+    // slice
+    auto sliced = coords[1..3];
+    assert(sliced.length == 2);
+    assert(sliced.dimensions == 2);
+    assert(sliced[0, 0] == 1);
+    assert(sliced[0, 1] == -2);
+    assert(sliced[1, 0] == 1);
+    assert(sliced[1, 1] == 2);
 
     // construct with uninitialized coordinates
     () @trusted
