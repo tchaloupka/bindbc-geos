@@ -1187,6 +1187,22 @@ struct Geometry
         }
     }
 
+    /// True if geometry is completely within geom, and not touching the boundary of geom
+    bool within(ref Geometry geom) const @trusted nothrow @nogc
+    {
+        auto r = GEOSWithin_r(ctx, this.g, geom.g);
+        assert(r != 2, "GEOSWithin()");
+        return r == 1;
+    }
+
+    /// True if geom is completely within geometry.
+    bool contains(ref Geometry geom) const @trusted nothrow @nogc
+    {
+        auto r = GEOSContains_r(ctx, this.g, geom.g);
+        assert(r != 2, "GEOSContains()");
+        return r == 1;
+    }
+
     private:
     GEOSGeometry* g;
     bool own = true;
@@ -1297,6 +1313,24 @@ unittest
     a ~= b;
     s = a.toString();
     assert(s == "LINESTRING (11 22, 33 44)", s);
+}
+
+@("within/contains")
+@safe unittest
+{
+    auto pt = Geometry.createPoint(0.5, 0.5);
+    auto poly = Geometry.createPolygon(Geometry.createLinearRing(CoordSequence(
+        Point(0, 0),
+        Point(1, 0),
+        Point(1, 1),
+        Point(0, 1),
+        Point(0, 0)
+    )));
+
+    assert(poly.contains(pt));
+    assert(!pt.contains(poly));
+    assert(pt.within(poly));
+    assert(!poly.within(pt));
 }
 
 /// Corresponds with PostGIS output numbers
