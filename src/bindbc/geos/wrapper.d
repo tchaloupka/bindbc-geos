@@ -1203,6 +1203,15 @@ struct Geometry
         return r == 1;
     }
 
+    /// Calculates distance between two geometries
+    double distance(ref Geometry geom) const @trusted nothrow @nogc
+    {
+        double dist;
+        auto r = GEOSDistance_r(ctx, this.g, geom.g, &dist);
+        assert(r == 1, "GEOSDistance()");
+        return dist;
+    }
+
     private:
     GEOSGeometry* g;
     bool own = true;
