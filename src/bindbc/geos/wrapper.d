@@ -11,6 +11,7 @@ import core.stdc.string : strlen;
 import bindbc.geos.libgeos;
 import std.algorithm : among, max, min;
 import std.math : isNaN;
+public import bindbc.geos.libgeos : GEOSGeomTypes;
 
 enum MessageLevel { notice, error }
 
