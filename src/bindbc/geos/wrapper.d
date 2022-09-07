@@ -133,6 +133,18 @@ struct Extent
     double ymin;
     double xmax;
     double ymax;
+
+    T opCast(T)() const if (is(T == Geometry))
+    {
+        return Geometry.createRectangle(xmin, ymin, xmax, ymax);
+    }
+}
+
+@("Extent")
+@safe unittest
+{
+    auto ext = Extent(0, 0, 1, 1);
+    assert((cast(Geometry)ext).extent == ext);
 }
 
 /// Simple wrapper for GEOS allocated strings.
