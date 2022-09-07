@@ -121,10 +121,25 @@ union PointXYZ(int dims) if (dims.among(2, 3))
         double x, y;
         static if (dims == 3) double z;
     }
+
+    T opCast(T)() const if (is(T == Geometry))
+    {
+        return Geometry.createPoint(this);
+    }
 }
 
 alias PointZ = PointXYZ!3;
 alias Point = PointXYZ!2;
+
+@("Point")
+@safe unittest
+{
+    auto pt = Point(0.1, 0.2);
+    auto geom = cast(Geometry)pt;
+    assert(geom.coordDimensions == 2);
+    assert(geom.x == pt.x);
+    assert(geom.y == pt.y);
+}
 
 /// Geometry extent coordinates (rectangle)
 struct Extent
