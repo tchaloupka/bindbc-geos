@@ -11,6 +11,7 @@ import core.stdc.string : strlen;
 import bindbc.geos.libgeos;
 import std.algorithm : among, max, min;
 import std.math : isNaN;
+import std.traits : allSameType;
 public import bindbc.geos.libgeos : GEOSGeomTypes;
 
 enum MessageLevel { notice, error }
@@ -692,6 +693,30 @@ struct Geometry
         return g !is null;
     }
 
+    // Sets point coordinates
+    ref Geometry opAssign(P)(auto ref P pt) @trusted
+        if (is(P : PointZ) || is(P : Point))
+    {
+        if (g is null) this = Geometry.createPoint(pt);
+        else
+        {
+            assert(this.typeId == GEOSGeomTypes.GEOS_POINT, "No point geometry");
+            auto cs = GEOSGeom_getCoordSeq_r(ctx, g);
+            int r;
+            static if (is(P == Point))
+                r = GEOSCoordSeq_setXY_r(ctx, cast(GEOSCoordSequence*)cs, 0, pt.x, pt.y);
+            else
+            {
+                if (dimensions == 2)
+                    r = GEOSCoordSeq_setXY_r(ctx, cast(GEOSCoordSequence*)cs, 0, pt.x, pt.y);
+                else
+                    r = GEOSCoordSeq_setXYZ_r(ctx, cast(GEOSCoordSequence*)cs, 0, pt.x, pt.y, pt.z);
+            }
+            assert(r != 0, "GEOSCoordSeq_setXY()");
+        }
+        return this;
+    }
+
     /// Creates an empty Point geometry.
     static Geometry createEmptyPoint() @trusted nothrow @nogc
     in (ctx !is null, "GEOS thread context not initialized")
@@ -833,11 +858,30 @@ struct Geometry
         return res;
     }
 
+    /// Creates polygon from points
+    static Geometry createPolygon(P)(const(P)[] points) @trusted if (isPoint!P)
+    {
+        auto g = Geometry.createPolygon(Geometry.createLinearRing(CoordSequence(points)));
+        if (!g.isValid) {
+            auto vg = GEOSMakeValid_r(ctx, g.g);
+            GEOSGeom_destroy_r(ctx, g.g);
+            g.g = vg;
+        }
+        return g;
+    }
+
+    /// ditto
+    static Geometry createPolygon(P)(const(P)[] points...) if (isPointStruct!P)
+    {
+        return Geometry.createPolygon(points);
+    }
+
     /**
      * Create a geometry collection.
      * Created Geometry takes ownership of the supplied ones.
      */
-    static Geometry createCollection(GEOSGeomTypes type, Geometry[] geoms...) @trusted nothrow @nogc
+    static Geometry createCollection(ARGS...)(GEOSGeomTypes type, auto ref ARGS geoms) @trusted nothrow @nogc
+        if (ARGS.length >= 1 && allSameType!ARGS && is(ARGS[0] == Geometry))
     in (ctx !is null, "GEOS thread context not initialized")
     in (geoms.length, "No source geometry provided")
     {
@@ -845,9 +889,9 @@ struct Geometry
         Geometry res;
 
         // we need to make an array of Geometry pointers first
-        if (geoms.length >= 64)
+        static if (ARGS.length <= 64)
         {
-            GEOSGeometry*[64] buf;
+            GEOSGeometry*[ARGS.length] buf;
             foreach (i, ref h; geoms) {
                 assert(h.g, "Uninitialized geometry");
                 buf[i] = h.g;
@@ -961,6 +1005,17 @@ struct Geometry
     {
         auto r = GEOSNormalize_r(ctx, g);
         assert(r == 0, "Failed to normalize geometry");
+    }
+
+    /// Returns the union of all components of a single geometry. Usually used to convert a
+    /// collection into the smallest set of polygons that cover the same area.
+    Geometry union_() @trusted nothrow @nogc
+    in (g !is null, "uninitialized geometry")
+    {
+        Geometry ret;
+        ret.g = GEOSUnaryUnion_r(ctx, g);
+        assert(ret.g, "GEOSUnaryUnion()");
+        return ret;
     }
 
     static if (geosSupport >= GEOSSupport.geos_3_11)
@@ -1325,7 +1380,7 @@ unittest
     assert(s == "LINESTRING (11 22, 33 44)", s);
 }
 
-@("within/contains")
+@("Geometry - within/contains")
 @safe unittest
 {
     auto pt = Geometry.createPoint(0.5, 0.5);
@@ -1341,6 +1396,109 @@ unittest
     assert(!pt.contains(poly));
     assert(pt.within(poly));
     assert(!poly.within(pt));
+}
+
+@("Geometry - union")
+@safe unittest
+{
+    auto p1 = Geometry.createPolygon(
+        Point(0, 0),
+        Point(1, 0),
+        Point(1, 1),
+        Point(0, 1),
+        Point(0, 0)
+    );
+
+    auto p2 = Geometry.createPolygon(
+        Point(2, 0),
+        Point(3, 0),
+        Point(3, 1),
+        Point(2, 1),
+        Point(2, 0)
+    );
+
+    auto p3 = Geometry.createPolygon(
+        Point(1, 0.4),
+        Point(2, 0.4),
+        Point(2, 0.6),
+        Point(1, 0.6),
+        Point(1, 0.4)
+    );
+
+    {
+        auto g = Geometry.createCollection(GEOSGeomTypes.GEOS_GEOMETRYCOLLECTION, p1.clone, p2.clone);
+        assert(g.typeId == GEOSGeomTypes.GEOS_GEOMETRYCOLLECTION);
+
+        auto u = g.union_();
+        assert(g.typeId == GEOSGeomTypes.GEOS_GEOMETRYCOLLECTION); // nothing common between them
+    }
+
+    {
+        auto g = Geometry.createCollection(GEOSGeomTypes.GEOS_GEOMETRYCOLLECTION, p1, p2, p3);
+        assert(g.typeId == GEOSGeomTypes.GEOS_GEOMETRYCOLLECTION);
+
+        auto u = g.union_();
+        debug { import std.stdio : writeln; try { writeln(u.toString()); } catch (Exception) {} }
+        assert(u.typeId == GEOSGeomTypes.GEOS_POLYGON); // merged to one polygon
+    }
+}
+
+/**
+ * Wrapper for `GEOSPreparedGeometry`.
+ * It is created from normal `Geometry` and takes ownership of it (so use copy when original geometry is needed)
+ */
+struct PreparedGeometry
+{
+    private Geometry g;
+    private const(GEOSPreparedGeometry)* pg;
+
+    /// Constructor
+    this(Geometry g)
+    in (g.g, "Uninitialized geometry")
+    {
+        this.g = g.move();
+        this.pg = GEOSPrepare_r(ctx, this.g.g);
+        assert(pg !is null, "GEOSPrepare()");
+    }
+
+    ~this() @trusted nothrow @nogc
+    {
+        destroy(g);
+        if (pg) GEOSPreparedGeom_destroy_r(ctx, pg);
+    }
+
+    /// Access internally held geometry
+    ref const(Geometry) geometry() return const @safe pure nothrow @nogc
+    {
+        return g;
+    }
+
+    /// A high performance calculation of whether the provided point is contained
+    bool contains(double x, double y) const @trusted nothrow @nogc
+    in (pg, "Uninitialized geometry")
+    {
+        // TODO: available only in master -> emulated for now
+        // auto r = GEOSPreparedContainsXY_r(ctx, this.pg, x, y);
+        static Geometry pt;
+        pt = Point(x, y);
+        auto r = GEOSPreparedContains_r(ctx, pg, pt.g);
+        assert(r != 2, "GEOSPreparedContainsXY()");
+        return r == 1;
+    }
+}
+
+@("PreparedGeometry")
+unittest
+{
+    auto poly = PreparedGeometry(Geometry.createPolygon(
+        Point(0, 0),
+        Point(1, 0),
+        Point(1, 1),
+        Point(0, 1),
+        Point(0, 0)
+    ));
+
+    assert(poly.contains(0.5, 0.5));
 }
 
 /// Corresponds with PostGIS output numbers
@@ -1638,7 +1796,7 @@ void msgHandlerImpl(MessageLevel lvl)(const(char)* fmt, ...)
     //     return;
     // }
 
-    // Workaround: abowe doesn't work due to the https://issues.dlang.org/show_bug.cgi?id=21425
+    // Workaround: above code doesn't work due to the https://issues.dlang.org/show_bug.cgi?id=21425
     char[512] buf;
     va_start(ap, fmt);
     auto n = vsnprintf(buf.ptr, buf.length, fmt, ap);
