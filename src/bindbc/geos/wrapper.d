@@ -11,7 +11,8 @@ import core.stdc.string : strlen;
 import bindbc.geos.libgeos;
 import std.algorithm : among, max, min;
 import std.math : isNaN;
-import std.traits : allSameType;
+import std.meta : allSatisfy;
+import std.traits : allSameType, isNumeric;
 public import bindbc.geos.libgeos : GEOSGeomTypes;
 
 enum MessageLevel { notice, error }
@@ -787,6 +788,18 @@ struct Geometry
         return res;
     }
 
+    /// Create LinearRing geometry from points
+    static Geometry createLinearRing(P)(const(P)[] points) @trusted if (isPoint!P)
+    {
+        return Geometry.createLinearRing(CoordSequence(points));
+    }
+
+    /// ditto
+    static Geometry createLinearRing(P)(const(P)[] points...) if (isPointStruct!P)
+    {
+        return Geometry.createLinearRing(points);
+    }
+
     /// Creates LineString geometry from `CoordSequence`
     static Geometry createLineString(CoordSequence coords) @trusted nothrow @nogc
     in (ctx !is null, "GEOS thread context not initialized")
@@ -797,6 +810,18 @@ struct Geometry
         if (res.g is null) assert(0, "Failed to create LineString");
         coords.seq = null; // geometry takes ownership of coords sequence
         return res;
+    }
+
+    /// Creates LineString geometry from points
+    static Geometry createLineString(P)(const(P)[] points) @trusted if (isPoint!P)
+    {
+        return Geometry.createLineString(CoordSequence(points));
+    }
+
+    /// ditto
+    static Geometry createLineString(P)(const(P)[] points...) if (isPointStruct!P)
+    {
+        return Geometry.createLineString(points);
     }
 
     /// Creates an empty LineString.
@@ -821,16 +846,17 @@ struct Geometry
 
     /// Creates a Polygon geometry from line ring geometries.
     /// Created Geometry takes ownership of the supplied ones.
-    static Geometry createPolygon(Geometry shell, Geometry[] holes...) @trusted nothrow @nogc
+    static Geometry createPolygon(ARGS...)(Geometry shell, auto ref ARGS holes) @trusted nothrow @nogc
+        if (ARGS.length == 0 || (allSameType!ARGS && is(ARGS[0] == Geometry)))
     in (ctx !is null, "GEOS thread context not initialized")
     in (shell.g, "Uninitialized shell geometry")
     {
         import core.exception : onOutOfMemoryError;
         Geometry res;
-        if (holes.length)
+        static if (ARGS.length)
         {
             // we need to make an array of Geometry pointers first
-            if (holes.length >= 64)
+            static if (holes.length >= 64)
             {
                 GEOSGeometry*[64] buf;
                 foreach (i, ref h; holes) {
@@ -1018,6 +1044,17 @@ struct Geometry
         return ret;
     }
 
+    /// Returns newly allocated geometry of the difference
+    Geometry difference()(auto ref const(Geometry) geom) @trusted nothrow @nogc
+    in (g !is null, "uninitialized geometry")
+    in (geom.g !is null, "uninitialized geometry")
+    {
+        Geometry ret;
+        ret.g = GEOSDifference_r(ctx, g, geom.g);
+        assert(ret.g, "GEOSDifference()");
+        return ret;
+    }
+
     static if (geosSupport >= GEOSSupport.geos_3_11)
     {
         /**
@@ -1154,9 +1191,10 @@ struct Geometry
     void toString(S)(auto ref S sink) const @trusted
     in (g !is null, "unitialized geometry")
     {
+        import std.range : put;
         char* s = GEOSWKTWriter_write_r(ctx, wktWriter, g);
         if (s is null) assert(0, "Failed to generate WKT from geometry");
-        sink(s[0..strlen(s)]);
+        put(sink, s[0..strlen(s)]);
         GEOSFree_r(ctx, s);
     }
 
@@ -1398,6 +1436,48 @@ unittest
     assert(!poly.within(pt));
 }
 
+@("Geometry - polygon")
+@safe unittest
+{
+    auto shell = Geometry.createLinearRing(
+        Point(0, 0),
+        Point(1, 0),
+        Point(1, 1),
+        Point(0, 1),
+        Point(0, 0)
+    );
+
+    auto hole = Geometry.createLinearRing(
+        Point(0.4, 0.4),
+        Point(0.6, 0.4),
+        Point(0.6, 0.6),
+        Point(0.4, 0.6),
+        Point(0.4, 0.4)
+    );
+
+    auto poly = Geometry.createPolygon(shell.clone(), hole.clone());
+    auto s = poly.toString();
+    assert(s == "POLYGON ((0 0, 1 0, 1 1, 0 1, 0 0), (0.4 0.4, 0.6 0.4, 0.6 0.6, 0.4 0.6, 0.4 0.4))", s);
+
+    poly = Geometry.createPolygon(shell.clone());
+    auto phole = Geometry.createPolygon(hole.clone());
+    poly = poly.difference(phole); // another way to make a hole
+    assert(phole); // not consumed
+    s = poly.toString();
+    assert(s == "POLYGON ((0 1, 1 1, 1 0, 0 0, 0 1), (0.6 0.4, 0.6 0.6, 0.4 0.6, 0.4 0.4, 0.6 0.4))", s);
+
+    poly = Geometry.createPolygon(shell.clone());
+    poly = poly.difference(Geometry.createPolygon(
+        Point(2, 0),
+        Point(3, 0),
+        Point(3, 1),
+        Point(2, 1),
+        Point(2, 0)
+    ));
+    s = poly.toString();
+    assert(s == "POLYGON ((0 1, 1 1, 1 0, 0 0, 0 1))", s); // same as polygon as hole is out of the polygon
+}
+
 @("Geometry - union")
 @safe unittest
 {
@@ -1438,7 +1518,8 @@ unittest
         assert(g.typeId == GEOSGeomTypes.GEOS_GEOMETRYCOLLECTION);
 
         auto u = g.union_();
-        debug { import std.stdio : writeln; try { writeln(u.toString()); } catch (Exception) {} }
+        auto s = u.toString();
+        assert(s == "POLYGON ((1 0, 0 0, 0 1, 1 1, 1 0.6, 2 0.6, 2 1, 3 1, 3 0, 2 0, 2 0.4, 1 0.4, 1 0))", s);
         assert(u.typeId == GEOSGeomTypes.GEOS_POLYGON); // merged to one polygon
     }
 }
@@ -1467,25 +1548,99 @@ struct PreparedGeometry
         if (pg) GEOSPreparedGeom_destroy_r(ctx, pg);
     }
 
+    /// Checks if the Geometry is initialized
+    bool opCast(T)() const if (is(T == bool))
+    {
+        return pg !is null;
+    }
+
     /// Access internally held geometry
     ref const(Geometry) geometry() return const @safe pure nothrow @nogc
     {
         return g;
     }
+}
 
-    /// A high performance calculation of whether the provided point is contained
-    bool contains(double x, double y) const @trusted nothrow @nogc
-    in (pg, "Uninitialized geometry")
+template checkRelationship(string rel)
+{
+    bool checkRelationship(GA, GB...)(auto ref const(GA) geomA, auto ref const(GB) geomB) @trusted nothrow @nogc
+        if ((is(GA == Geometry) || is(GA == PreparedGeometry)) && GB.length >= 1)
+    in (geomA, "Uninitialized geometry")
     {
-        // TODO: available only in master -> emulated for now
-        // auto r = GEOSPreparedContainsXY_r(ctx, this.pg, x, y);
-        static Geometry pt;
-        pt = Point(x, y);
-        auto r = GEOSPreparedContains_r(ctx, pg, pt.g);
-        assert(r != 2, "GEOSPreparedContainsXY()");
+        static if (is(GB[0] == Geometry)) {
+            static assert(GB.length == 1, "Too many arguments");
+            alias chg = geomB[0];
+        }
+        else static if (allSatisfy!(isNumeric, GB)) {
+            static Geometry pt;
+            alias chg = pt;
+            static if (GB.length == 2) pt = Point(geomB[0], geomB[1]);
+            else static if (GB.length == 3) pt = Point(geomB[0], geomB[1], geomB[2]);
+            else static assert(0, "Too many coordinates for Point");
+        }
+        else static if (isPointStruct!(GB[0])) {
+            static assert(GB.length == 1, "Too many arguments");
+            static Geometry pt;
+            alias chg = pt;
+            pt = geomB[0];
+        }
+        else static assert(0, "Unsupported arguments combination");
+
+        assert(chg, "Uninitialized geometry");
+        static if (is(G == Geometry))
+            auto r = mixin("GEOS" ~ rel ~ "_r")(ctx, geomA.g, chg.g);
+        else
+            auto r = mixin("GEOSPrepared" ~ rel ~ "_r")(ctx, geomA.pg, chg.g);
+        assert(r != 2);
         return r == 1;
     }
 }
+
+/// Opposite to intersects
+/// Overlaps, Touches, Within all imply geometries are not spatially disjoint. If any of the
+/// aforementioned returns true, then the geometries are not spatially disjoint. Disjoint implies
+/// false for spatial intersection.
+alias disjoint = checkRelationship!"Disjoint";
+
+/// Returns TRUE if A and B intersect, but their interiors do not intersect. Equivalently, A and B
+/// have at least one point in common, and the common points lie in at least one boundary. For
+/// Point/Point inputs the relationship is always FALSE, since points do not have a boundary.
+alias touches = checkRelationship!"Touches";
+
+/// Compares two geometries and returns true if they intersect. Geometries intersect if they have any point in common.
+alias intersects = checkRelationship!"Intersects";
+
+/// Compares two geometry objects and returns true if their intersection "spatially cross", that is,
+/// the geometries have some, but not all interior points in common.
+alias crosses = checkRelationship!"Crosses";
+
+/// Tests if no points of A lie in the exterior of B, and A and B have at least one interior point in common.
+alias within = checkRelationship!"Within";
+
+/// Returns TRUE if geometry B is completely inside geometry A. A contains B if and only if no
+/// points of B lie in the exterior of A, and at least one point of the interior of B lies in the
+/// interior of A.
+alias contains = checkRelationship!"Contains";
+
+/// Returns TRUE if geometry A and B "spatially overlap". Two geometries overlap if they have the
+/// same dimension, each has at least one point not shared by the other (or equivalently neither
+/// covers the other), and the intersection of their interiors has the same dimension. The overlaps
+/// relationship is symmetrical.
+alias overlaps = checkRelationship!"Overlaps";
+
+/// Tests the spatial equality of two geometries
+alias equals = checkRelationship!"Equals";
+
+/// Returns true if no point in Geometry/Geography B is outside Geometry/Geography A. Equivalently,
+/// tests if every point of geometry B is inside (i.e. intersects the interior or boundary of)
+/// geometry A.
+alias covers = checkRelationship!"Covers";
+
+/// Returns true if no point in Geometry/Geography A lies outside Geometry/Geography B.
+/// Equivalently, tests if every point of geometry A is inside (i.e. intersects the interior or
+/// boundary of) geometry B.
+alias coveredBy = checkRelationship!"CoveredBy";
+
 
 @("PreparedGeometry")
 unittest
@@ -1499,6 +1654,13 @@ unittest
     ));
 
     assert(poly.contains(0.5, 0.5));
+    assert(poly.contains(Geometry.createPolygon(
+        Point(0.4, 0.4),
+        Point(0.6, 0.4),
+        Point(0.6, 0.6),
+        Point(0.4, 0.6),
+        Point(0.4, 0.4)
+    )));
 }
 
 /// Corresponds with PostGIS output numbers
