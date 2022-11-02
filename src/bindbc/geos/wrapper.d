@@ -21,7 +21,7 @@ alias MessageHandler = void function(MessageLevel, const(char)[]) nothrow;
 
 /**
  * Initializes GEOS for the current thread.
- * It must be called for each tred prior to the usage.
+ * It must be called for each thread prior to the usage.
  * If no message handler is provided, default'll be used that just outputs messages to the STDOUT/STDERR.
  *
  * `finishGEOS` must be called to free resources on thread exit
@@ -286,7 +286,7 @@ struct CoordSequence
         }
     }
 
-    /// ditto - just variadic variant for coordinate structs as a source
+    /// ditto - just variadic variant for coordinate structures as a source
     this(P)(const(P)[] points...) @trusted nothrow @nogc
         if (isPointStruct!P)
     {
@@ -314,7 +314,7 @@ struct CoordSequence
 
     /// Copy the contents of a coordinate sequence to individual dimension buffers
     void toArrays(double[] x, double[] y, double[] z = null) const @trusted nothrow @nogc
-    in (seq !is null, "unitialized sequence")
+    in (seq !is null, "uninitialized sequence")
     in (x.length == y.length && (z.length == 0 || z.length == x.length) && x.length == length(), "Lengths don't match")
     {
         if (z.length)
@@ -349,7 +349,7 @@ struct CoordSequence
 
     /// Copy the contents of a coordinate sequence to a buffer of doubles (XYXY or XYZXYZ)
     void toBuffer(int N)(double[N][] buf) const @trusted nothrow @nogc
-    in (seq !is null, "unitialized sequence")
+    in (seq !is null, "uninitialized sequence")
     in (buf.length == length(), "Lengths don't match")
     {
         static if (N == 2)
@@ -381,7 +381,7 @@ struct CoordSequence
 
     /// Get size info from a coordinate sequence.
     uint length() const @trusted nothrow @nogc
-    in (seq !is null, "unitialized sequence")
+    in (seq !is null, "uninitialized sequence")
     {
         uint sz = void;
         auto r = GEOSCoordSeq_getSize_r(ctx, seq, &sz);
@@ -391,7 +391,7 @@ struct CoordSequence
 
     /// Get dimension info from a coordinate sequence.
     uint dimensions() const @trusted nothrow @nogc
-    in (seq !is null, "unitialized sequence")
+    in (seq !is null, "uninitialized sequence")
     {
         uint dims = void;
         auto r = GEOSCoordSeq_getDimensions_r(ctx, seq, &dims);
@@ -404,7 +404,7 @@ struct CoordSequence
      * Sequence must have at least 4 points.
      */
     bool isCCW() const @trusted nothrow @nogc
-    in (seq !is null, "unitialized sequence")
+    in (seq !is null, "uninitialized sequence")
     in (length >= 4, "not enough points to check CCW")
     {
         char isccw = void;
@@ -415,7 +415,7 @@ struct CoordSequence
 
     /// Gets value of requested coordinate in sequence
     double opIndex(size_t idx, size_t dim) const @trusted nothrow @nogc
-    in (seq !is null, "unitialized sequence")
+    in (seq !is null, "uninitialized sequence")
     in (idx < length, "invalid index")
     in (dim < dimensions, "invalid dimension")
     {
@@ -427,7 +427,7 @@ struct CoordSequence
 
     /// ditto
     const(PointZ) opIndex(size_t idx) const @trusted nothrow @nogc
-    in (seq !is null, "unitialized sequence")
+    in (seq !is null, "uninitialized sequence")
     in (idx < length, "invalid index")
     {
         PointZ p = void;
@@ -451,7 +451,7 @@ struct CoordSequence
 
     /// Set Nth ordinate value in a coordinate sequence.
     double opIndexAssign(double value, size_t idx, size_t dim) @trusted nothrow @nogc
-    in (seq !is null, "unitialized sequence")
+    in (seq !is null, "uninitialized sequence")
     in (idx < length, "invalid index")
     in (dim < dimensions, "invalid dimension")
     {
@@ -463,7 +463,7 @@ struct CoordSequence
     /// ditto for generic acceptable point types
     auto opIndexAssign(P)(auto ref P point, size_t idx) @trusted nothrow @nogc
         if (isPoint!P)
-    in (seq !is null, "unitialized sequence")
+    in (seq !is null, "uninitialized sequence")
     in (idx < length, "invalid index")
     {
         int res;
@@ -502,7 +502,7 @@ struct CoordSequence
 
     /// Returns new CoordSequence instance from sliced coordinates
     CoordSequence opSlice(uint start, uint end) @trusted nothrow @nogc
-    in (seq !is null, "unitialized sequence")
+    in (seq !is null, "uninitialized sequence")
     in (start >= 0 && end <= length, "invalid index")
     {
         CoordSequence res = CoordSequence(end - start, this.dimensions);
@@ -595,7 +595,7 @@ struct Geometry
      * Uses: `GEOSGeomTypeId` function
      */
     GEOSGeomTypes typeId() const @trusted nothrow @nogc
-    in (g !is null, "unitialized geometry")
+    in (g !is null, "uninitialized geometry")
     {
         auto tid = GEOSGeomTypeId_r(ctx, g);
         assert(tid >= 0, "Error getting geometry typeId");
@@ -629,14 +629,14 @@ struct Geometry
      *   2 for polygon, multipolygon
      */
     int dimensions() const @trusted nothrow @nogc
-    in (g !is null, "unitialized geometry")
+    in (g !is null, "uninitialized geometry")
     {
         return GEOSGeom_getDimensions_r(ctx, g);
     }
 
     /// Finds the extent (minimum and maximum X and Y value) of the geometry.
     void extent(out double xmin, out double ymin, out double xmax, out double ymax) const @trusted nothrow @nogc
-    in (g !is null, "unitialized geometry")
+    in (g !is null, "uninitialized geometry")
     {
         static if (geosSupport >= GEOSSupport.geos_3_11)
         {
@@ -654,7 +654,7 @@ struct Geometry
 
     /// ditto
     Extent extent() const @trusted nothrow @nogc
-    in (g !is null, "unitialized geometry")
+    in (g !is null, "uninitialized geometry")
     {
         Extent ext;
         extent(ext.xmin, ext.ymin, ext.xmax, ext.ymax);
@@ -663,7 +663,7 @@ struct Geometry
 
     /// Get the total number of points in a geometry, of any type.
     uint coordNum() const @trusted nothrow @nogc
-    in (g !is null, "unitialized geometry")
+    in (g !is null, "uninitialized geometry")
     {
         auto r = GEOSGetNumCoordinates_r(ctx, g);
         assert(r != -1, "Failed to get number of coordinates");
@@ -673,7 +673,7 @@ struct Geometry
     /// Return the coordinate sequence underlying the given geometry (Must be a LineString,
     /// LinearRing or Point).
     CoordSequence coordSeq() const @trusted nothrow @nogc
-    in (g !is null, "unitialized geometry")
+    in (g !is null, "uninitialized geometry")
     {
         CoordSequence cseq;
         cseq.seq = cast(GEOSCoordSequence*)GEOSGeom_getCoordSeq_r(ctx, g);
@@ -689,7 +689,7 @@ struct Geometry
      *   * 3 for XYZ data
      */
     uint coordDimensions() const @trusted nothrow @nogc
-    in (g !is null, "unitialized geometry")
+    in (g !is null, "uninitialized geometry")
     {
         auto ret = GEOSGeom_getCoordinateDimension_r(ctx, g);
         assert(ret.among(2,3), "Failed to determine geometry dimensions");
@@ -1005,7 +1005,7 @@ struct Geometry
     /// Return the anonymous "user data" for this geometry. User data must be managed by the caller,
     /// and freed before the geometry is freed.
     void* userData() const @trusted nothrow @nogc
-    in (g !is null, "unitialized geometry")
+    in (g !is null, "uninitialized geometry")
     {
         return GEOSGeom_getUserData_r(ctx, g);
     }
@@ -1013,7 +1013,7 @@ struct Geometry
     /// Set the anonymous "user data" for this geometry. Don't forget to free the user data before
     /// freeing the geometry.
     void userData(void* data) @trusted nothrow @nogc
-    in (g !is null, "unitialized geometry")
+    in (g !is null, "uninitialized geometry")
     {
         GEOSGeom_setUserData_r(ctx, g, data);
     }
@@ -1022,7 +1022,7 @@ struct Geometry
     /// for a simple geometry. For nested collections, remember to check if returned sub-geometries
     /// are themselves also collections.
     int numGeometries() const @trusted nothrow @nogc
-    in (g !is null, "unitialized geometry")
+    in (g !is null, "uninitialized geometry")
     {
         return GEOSGetNumGeometries_r(ctx, g);
     }
@@ -1054,7 +1054,7 @@ struct Geometry
      * Use before calling `equalsExact` to avoid false "not equal" results.
      */
     void normalize() @trusted nothrow @nogc
-    in (g !is null, "unitialized geometry")
+    in (g !is null, "uninitialized geometry")
     {
         auto r = GEOSNormalize_r(ctx, g);
         assert(r == 0, "Failed to normalize geometry");
@@ -1094,8 +1094,8 @@ struct Geometry
         * Returns:
         *     A geometry with all points within the tolerance of each other removed.
         */
-        Geometry removeRepeatedpoints(double tolerance = 0.0) const @trusted nothrow @nogc
-        in (g !is null, "unitialized geometry")
+        Geometry removeRepeatedPoints(double tolerance = 0.0) const @trusted nothrow @nogc
+        in (g !is null, "uninitialized geometry")
         {
             Geometry ret;
             ret.g = GEOSRemoveRepeatedPoints_r(ctx, g, tolerance);
@@ -1107,7 +1107,7 @@ struct Geometry
     /// Tests whether the input geometry is empty. If the geometry or any component is non-empty,
     /// the geometry is non-empty. An empty geometry has no boundary or interior.
     bool isEmpty() const @trusted nothrow @nogc
-    in (g !is null, "unitialized geometry")
+    in (g !is null, "uninitialized geometry")
     {
         auto ret = GEOSisEmpty_r(ctx, g);
         assert(ret.among(0, 1), "Failed to check if geometry is empty");
@@ -1117,7 +1117,7 @@ struct Geometry
     /// Tests whether the input geometry is a ring. Rings are linestrings, without
     /// self-intersections, with start and end point being identical.
     bool isRing() const @trusted nothrow @nogc
-    in (g !is null, "unitialized geometry")
+    in (g !is null, "uninitialized geometry")
     {
         auto ret = GEOSisRing_r(ctx, g);
         assert(ret.among(0, 1), "Failed to check if geometry is ring");
@@ -1126,7 +1126,7 @@ struct Geometry
 
     /// Tests whether the input geometry has z coordinates.
     bool hasZ() const @trusted nothrow @nogc
-    in (g !is null, "unitialized geometry")
+    in (g !is null, "uninitialized geometry")
     {
         auto ret = GEOSHasZ_r(ctx, g);
         assert(ret.among(0, 1), "Failed to check if geometry has Z");
@@ -1136,7 +1136,7 @@ struct Geometry
     /// Tests whether the input geometry is closed. A closed geometry is a linestring or
     /// multilinestring with the start and end points being the same.
     bool isClosed() const @trusted nothrow @nogc
-    in (g !is null, "unitialized geometry")
+    in (g !is null, "uninitialized geometry")
     {
         auto ret = GEOSisClosed_r(ctx, g);
         assert(ret.among(0, 1), "Failed to check if geometry is closed");
@@ -1146,7 +1146,7 @@ struct Geometry
     /// Tests whether the input geometry is "simple". Mostly relevant for linestrings. A "simple"
     /// linestring has no self-intersections.
     bool isSimple() const @trusted nothrow @nogc
-    in (g !is null, "unitialized geometry")
+    in (g !is null, "uninitialized geometry")
     {
         auto ret = GEOSisSimple_r(ctx, g);
         assert(ret.among(0, 1), "Failed to check if geometry is simple");
@@ -1162,7 +1162,7 @@ struct Geometry
      *   * Multi-polygon components may not touch or overlap.
      */
     bool isValid() const @trusted nothrow @nogc
-    in (g !is null, "unitialized geometry")
+    in (g !is null, "uninitialized geometry")
     {
         auto ret = GEOSisValid_r(ctx, g);
         assert(ret.among(0, 1), "Failed to check if geometry is valid");
@@ -1171,7 +1171,7 @@ struct Geometry
 
     /// Return the human readable reason a geometry is invalid, "Valid Geometry" string otherwise.
     GeosString isValidReason() const @trusted nothrow @nogc
-    in (g !is null, "unitialized geometry")
+    in (g !is null, "uninitialized geometry")
     {
         auto c = GEOSisValidReason_r(ctx, g);
         assert(c !is null, "Failed to check if geometry is valid");
@@ -1181,7 +1181,7 @@ struct Geometry
     /// In one step, calculate and return the validity, the human readable validity reason and a
     /// point at which validity rules are broken.
     bool isValidDetail(out GeosString reason, out Geometry location) const @trusted nothrow @nogc
-    in (g !is null, "unitialized geometry")
+    in (g !is null, "uninitialized geometry")
     {
         char* c;
         GEOSGeometry* g;
@@ -1194,7 +1194,7 @@ struct Geometry
 
     /// True if geometries cover the same space on the place.
     bool equals(const Geometry other) const @trusted nothrow @nogc
-    in (g !is null && other.g !is null, "unitialized geometry")
+    in (g !is null && other.g !is null, "uninitialized geometry")
     {
         auto r = GEOSEquals_r(ctx, this.g, other.g);
         assert(r.among(0, 1), "Failed to determine if geometries are equal");
@@ -1207,7 +1207,7 @@ struct Geometry
     /// different representations (e.g., LINESTRING (0 0, 1 1) and MULTILINESTRING ((0 0, 1 1)) )
     /// are not considered equal by GEOSEqualsExact().
     bool equalsExact(const Geometry other, double tolerance = 0.0) const @trusted nothrow @nogc
-    in (g !is null && other.g !is null, "unitialized geometry")
+    in (g !is null && other.g !is null, "uninitialized geometry")
     {
         auto r = GEOSEqualsExact_r(ctx, this.g, other.g, tolerance);
         assert(r.among(0, 1), "Failed to determine if geometries are equal");
@@ -1216,7 +1216,7 @@ struct Geometry
 
     /// Generates geometry as [WKT](https://libgeos.org/specifications/wkt/) string
     void toString(S)(auto ref S sink) const @trusted
-    in (g !is null, "unitialized geometry")
+    in (g !is null, "uninitialized geometry")
     {
         import std.range : put;
         char* s = GEOSWKTWriter_write_r(ctx, wktWriter, g);
@@ -1227,7 +1227,7 @@ struct Geometry
 
     /// ditto
     string toString() const @trusted
-    in (g !is null, "unitialized geometry")
+    in (g !is null, "uninitialized geometry")
     {
         char* s = GEOSWKTWriter_write_r(ctx, wktWriter, g);
         if (s is null) assert(0, "Failed to generate WKT from geometry");
@@ -1244,7 +1244,7 @@ struct Geometry
 
     /// Calculate the area of a geometry.
     double area() const @trusted nothrow @nogc
-    in (g !is null, "unitialized geometry")
+    in (g !is null, "uninitialized geometry")
     {
         double area;
         auto ret = GEOSArea_r(ctx, g, &area);
@@ -1254,7 +1254,7 @@ struct Geometry
 
     /// Calculate the length of a geometry.
     double length() const @trusted nothrow @nogc
-    in (g !is null, "unitialized geometry")
+    in (g !is null, "uninitialized geometry")
     {
         double len;
         auto ret = GEOSLength_r(ctx, g, &len);
@@ -1338,7 +1338,7 @@ struct Geometry
     bool own = true;
 
     double getCoordinate(alias fn)() const @trusted nothrow @nogc
-    in (g !is null, "unitialized geometry")
+    in (g !is null, "uninitialized geometry")
     {
         double coord = void;
         auto r = fn(ctx, g, &coord);
@@ -1667,7 +1667,6 @@ alias covers = checkRelationship!"Covers";
 /// Equivalently, tests if every point of geometry A is inside (i.e. intersects the interior or
 /// boundary of) geometry B.
 alias coveredBy = checkRelationship!"CoveredBy";
-
 
 @("PreparedGeometry")
 unittest
